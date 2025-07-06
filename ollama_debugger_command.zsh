@@ -24,37 +24,33 @@ log_file="debug_command.log"
 # Start logging
 echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting execution of command: $user_command" | tee -a "$log_file"
 
-# Create temporary files to capture stdout and stderr
-temp_stdout=$(mktemp)
-temp_stderr=$(mktemp)
+# Create temporary files for script output
+temp_output=$(mktemp)
 temp_json=$(mktemp)
 
 # Function to clean up temporary files on exit
 cleanup() {
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] Cleaning up temporary files." | tee -a "$log_file"
-    rm -f "$temp_stdout" "$temp_stderr" "$temp_json"
+    rm -f "$temp_output" "$temp_json"
 }
 trap cleanup EXIT
 
-# Execute the command using ZSH, capturing stdout and stderr
-echo "[$(date +"%Y-%m-%d %H:%M:%S")] Executing command..." | tee -a "$log_file"
+# Execute the command using script to capture full terminal session
+echo "[$(date +"%Y-%m-%d %H:%M:%S")] Executing command with script..." | tee -a "$log_file"
 
-# Disable 'set -e' behavior temporarily to handle command failure manually
+# Use script to capture the command execution with proper TTY behavior
+# -q: quiet mode (no start/done messages)
+# -e: return exit status of child process (compatibility with util-linux)
+# For BSD script with complex commands: script [-q] [-e] [file] [shell] [-c] [command]
 set +e
-zsh -c "$user_command" >"$temp_stdout" 2>"$temp_stderr"
+script -q -e "$temp_output" /bin/zsh -c "$user_command" >/dev/null 2>&1
 exit_status=$?
-set -e  # Re-enable 'set -e' if needed later
+set -e
 
-# Display stdout
-if [ -s "$temp_stdout" ]; then
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Command STDOUT:" | tee -a "$log_file"
-    cat "$temp_stdout" | tee -a "$log_file"
-fi
-
-# Display stderr
-if [ -s "$temp_stderr" ]; then
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Command STDERR:" | tee -a "$log_file"
-    cat "$temp_stderr" | tee -a "$log_file" >&2
+# Display the captured output
+if [ -s "$temp_output" ]; then
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Command output:" | tee -a "$log_file"
+    cat "$temp_output" | tee -a "$log_file"
 fi
 
 # If the command failed, proceed to interact with the Python shell debugger
@@ -89,26 +85,42 @@ if [ $exit_status -ne 0 ]; then
         [inputs | split("=") | {(.[0]): .[1]}] | add
     ')
 
-    # Properly escape multi-line string fields using jq and remove trailing newlines
+    # Read the script output as both stdout and stderr since script captures everything
+    script_output=$(cat "$temp_output")
+
+    # For script output, we treat it as stderr since that's where error messages typically appear
+    # and the command failed. For successful parts, they would be mixed in the same output.
+
+    # Clean up control characters and properly escape for JSON
+    # Remove carriage returns and other control characters, then escape with jq
+    cleaned_script_output=$(echo "$script_output" | tr -d '\r' | tr -d '\0')
+    escaped_script_output=$(echo "$cleaned_script_output" | jq -Rs .)
     escaped_os_release=$(echo "$os_release" | tr -d '\n' | jq -Rs .)
     escaped_system_information=$(echo "$system_information" | tr -d '\n' | jq -Rs .)
     escaped_command_binary_details=$(echo "$command_binary_details" | tr -d '\n' | jq -Rs .)
     escaped_command_version=$(echo "$command_version" | tr -d '\n' | jq -Rs .)
 
+    # Note: BSD script doesn't support separate timing files
+    timing_info="Not available (BSD script)"
+    escaped_timing_info=$(echo "$timing_info" | jq -Rs .)
+
     # Create a JSON payload with all error details
+    # Note: For script output, we put the full output in stderr since it contains error info
+    # and leave stdout empty since script combines everything
     error_details=$(jq -n \
         --arg command "$user_command" \
         --arg exit_status "$exit_status" \
-        --argjson stdout "$(cat "$temp_stdout" | jq -R . | jq -s .)" \
-        --argjson stderr "$(cat "$temp_stderr" | jq -R . | jq -s .)" \
+        --argjson stdout "[]" \
+        --arg stderr "$cleaned_script_output" \
         --arg working_directory "$working_directory" \
         --arg shell "$shell_path" \
         --arg PATH "$PATH_var" \
-        --argjson system_information "$escaped_system_information" \
-        --argjson os_release "$escaped_os_release" \
-        --argjson command_binary_details "$escaped_command_binary_details" \
-        --argjson command_version "$escaped_command_version" \
+        --arg system_information "$system_information" \
+        --arg os_release "$os_release" \
+        --arg command_binary_details "$command_binary_details" \
+        --arg command_version "$command_version" \
         --argjson environment_variables "$environment_variables" \
+        --arg timing_info "$timing_info" \
         '{
             command: $command,
             exit_status: ($exit_status | tonumber),
@@ -121,17 +133,19 @@ if [ $exit_status -ne 0 ]; then
             os_release: $os_release,
             command_binary_details: $command_binary_details,
             command_version: $command_version,
-            environment_variables: $environment_variables
+            environment_variables: $environment_variables,
+            timing_info: $timing_info,
+            capture_method: "script"
         }')
 
-    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Error details gathered." | tee -a "$log_file"
+    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Error details gathered using script." | tee -a "$log_file"
 
     # Optionally, verify the JSON structure
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] Generated JSON payload:" | tee -a "$log_file"
     echo "$error_details" | jq . | tee -a "$log_file"
 
     # Save the JSON payload to a temporary file
-    echo "$error_details" > "$temp_json"
+    echo "$error_details" >"$temp_json"
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] Error details saved to $temp_json." | tee -a "$log_file"
 
     # Check if Python script exists

@@ -136,6 +136,31 @@ ALLOWED_FUNCTIONS = {
 # Helper Functions
 # ==========================
 
+# Helper function to extract command from ```sh code blocks
+def extract_command_from_codeblock(content: str) -> str:
+    """Extract command from ```sh code blocks, fallback to original content if no blocks found."""
+    # Look for ```sh code blocks
+    import re
+    
+    # Pattern to match ```sh\ncommand\n```
+    pattern = r'```sh\s*\n(.*?)\n```'
+    matches = re.findall(pattern, content, re.DOTALL)
+    
+    if matches:
+        # Return the first command found, stripped of whitespace
+        return matches[0].strip()
+    
+    # Pattern to match just ``` code blocks (fallback)
+    pattern = r'```\s*\n(.*?)\n```'
+    matches = re.findall(pattern, content, re.DOTALL)
+    
+    if matches:
+        # Return the first command found, stripped of whitespace
+        return matches[0].strip()
+    
+    # If no code blocks found, return original content
+    return content.strip()
+
 def create_assistant():
     """
     Creates an assistant with predefined tools and instructions.
@@ -146,7 +171,7 @@ def create_assistant():
             name="Shell Debugger",
             instructions=(
                 "You are a shell debugger. Analyze shell command errors and suggest fixes. "
-                "Only suggest the exact shell command to execute in a shell that may solve their problem, no extraneous text."
+                "Respond with the corrected shell command wrapped in ```sh code blocks. "
                 "Use the provided functions to gather additional information when necessary."
             ),
             tools=[
@@ -401,9 +426,11 @@ def send_suggestion(suggestion):
     logging.debug(f"send_suggestion: {suggestion}")
     try:
         with open(FIFO_PATH, 'w') as fifo:
+            # Extract command from ```sh code blocks if present
+            cleaned_suggestion = extract_command_from_codeblock(suggestion)
             # Strip leading/trailing whitespace and newlines
-            suggestion = suggestion.strip()
-            fifo.write(suggestion + '\n')
+            cleaned_suggestion = cleaned_suggestion.strip()
+            fifo.write(cleaned_suggestion + '\n')
             fifo.write('EOF\n')
             fifo.flush()
     except Exception as e:
@@ -574,7 +601,7 @@ def initiate_run(user_command, assistant_id, thread):
             assistant_id=assistant_id,
             instructions=(
                 "You are a shell debugger. Analyze shell command errors and suggest a working command. "
-                "You are to only provide a suggested shell command-line, no other text, and no code blocks. "
+                "Respond with the corrected shell command wrapped in ```sh code blocks. "
                 "Use the provided functions to gather additional information when necessary."
             ),
             event_handler=StreamingEventHandler(),
@@ -634,47 +661,126 @@ def create_thread_if_not_exists(config):
     save_config(config)
     return thread_id
 
+def gather_error_details_from_files(command: str, output_file: str, timing_file: str = None, capture_method: str = "traditional") -> dict:
+    """
+    Gathers detailed error information from script output files.
+    """
+    logging.debug(f"Gathering error details from files: output={output_file}, timing={timing_file}, method={capture_method}")
+    
+    try:
+        # Read the output file
+        script_output = ""
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+            with open(output_file, 'r') as f:
+                script_output = f.read()
+        
+        # Read timing information if available
+        timing_info = ""
+        if timing_file and os.path.exists(timing_file) and os.path.getsize(timing_file) > 0:
+            with open(timing_file, 'r') as f:
+                timing_info = f.read()
+        
+        # Default to failure exit status
+        exit_status = 1
+        
+        details = {
+            "timestamp": datetime.now().isoformat(),
+            "command": command,
+            "exit_status": exit_status,
+            "stdout": "",  # script combines output
+            "stderr": script_output,  # Put everything in stderr since command failed
+            "working_directory": os.getcwd(),
+            "shell": os.getenv('SHELL', ''),
+            "PATH": os.getenv('PATH', ''),
+            "system_information": subprocess.getoutput('uname -a') if shutil.which('uname') else "System information not available",
+            "os_release": subprocess.getoutput('cat /etc/os-release') if os.path.exists('/etc/os-release') else "OS release information not available",
+            "command_binary_details": subprocess.getoutput(f'which {shlex.split(command)[0]}') if shutil.which(shlex.split(command)[0]) else "Command not found in PATH",
+            "command_version": subprocess.getoutput(f'{shlex.split(command)[0]} --version') if shutil.which(shlex.split(command)[0]) else "Version information not available",
+            "environment_variables": dict(os.environ),
+            "timing_info": timing_info,
+            "capture_method": capture_method
+        }
+        
+        logging.debug(f"Error details gathered: {details}")
+        return details
+        
+    except Exception as e:
+        logging.exception("Error gathering error details from files")
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "command": command,
+            "exit_status": 1,
+            "stdout": "",
+            "stderr": f"Error gathering error details: {str(e)}",
+            "capture_method": capture_method,
+            "error": f"Error gathering error details: {str(e)}"
+        }
+
 # ==========================
 # Main Execution Flow
 # ==========================
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: openai_debugger.py <command>", file=sys.stderr)
-        sys.exit(1)
-
+    """
+    Main function to handle both traditional JSON file input and new script-based capture.
+    """
+    logging.debug("Starting main execution flow")
+    
     # Load configuration
     config = load_config()
-
-    # Reconstruct the command from arguments
-    user_command = ' '.join(sys.argv[1:])
-
-    # Execute the user's command
-    stdout, stderr, exit_status = execute_shell_command(user_command)
-
-    # Output the command result to the terminal
-    print(stdout, end='')  # stdout may already contain newlines
-    if stderr:
-        print(stderr, end='', file=sys.stderr)
-
-    # If the command failed, proceed to interact with the assistant
-    if exit_status != 0:
-        # Create assistant if not exists
-        assistant_id = create_assistant_if_not_exists(config)
-
-        # Create thread if not exists
-        # Log the error details
-        error_details = gather_error_details(user_command, exit_status, stdout, stderr)
-        thread = create_thread(error_details)
+    
+    # Handle different argument patterns
+    if len(sys.argv) == 2:
+        # Original usage: python script.py <command>
+        # In this case, we need to execute the command and gather error details
+        user_command = sys.argv[1]
+        logging.debug(f"Executing command: {user_command}")
         
-        log_error(error_details)
+        # Execute the command and gather error details
+        stdout, stderr, exit_status = execute_shell_command(user_command)
+        
+        if exit_status != 0:
+            error_details = gather_error_details(user_command, exit_status, stdout, stderr)
+        else:
+            logging.debug("Command succeeded, no debugging needed")
+            print("Command executed successfully.")
+            return
+            
+    elif len(sys.argv) == 5:
+        # New usage: python script.py <command> <output_file> <timing_file> <capture_method>
+        user_command = sys.argv[1]
+        output_file = sys.argv[2]
+        timing_file = sys.argv[3] if sys.argv[3] != "None" else None
+        capture_method = sys.argv[4]
+        
+        logging.debug(f"Using script-based capture: command={user_command}, output_file={output_file}, timing_file={timing_file}, method={capture_method}")
+        error_details = gather_error_details_from_files(user_command, output_file, timing_file, capture_method)
+        
+    else:
+        logging.error("Invalid arguments")
+        print("Usage: python openai_debugger.py <command>")
+        print("   or: python openai_debugger.py <command> <output_file> <timing_file> <capture_method>")
+        sys.exit(1)
 
-        # Initiate a run with the assistant
-        initiate_run(user_command, assistant_id, thread)
-        # Monitor and handle the run
-        # monitor_run(run, thread)
+    # Create or get assistant
+    assistant_id = create_assistant_if_not_exists(config)
+    if not assistant_id:
+        logging.error("Failed to create or retrieve assistant.")
+        print("Error: Failed to create or retrieve assistant.", file=sys.stderr)
+        sys.exit(1)
 
-    sys.exit(exit_status)
+    # Create thread with error details
+    thread = create_thread(error_details)
+    if not thread:
+        logging.error("Failed to create thread.")
+        print("Error: Failed to create thread.", file=sys.stderr)
+        sys.exit(1)
+
+    # Start the run with the user's command and the assistant
+    run = initiate_run(user_command, assistant_id, thread)
+    if run:
+        # Monitor the run until completion
+        monitor_run(run, thread)
 
 if __name__ == "__main__":
     main()
