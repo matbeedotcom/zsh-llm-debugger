@@ -242,6 +242,51 @@ Install Ollama following the installation instructions above.
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+### Development Setup
+
+For developers who want to contribute to the project:
+
+```bash
+# Clone the repository
+git clone https://github.com/acidhax/zsh-llm-debugger.git
+cd zsh-llm-debugger
+
+# Run the development setup script
+./install-dev.sh
+```
+
+This will:
+- Create a Python virtual environment in the project directory
+- Install all dependencies
+- Create an `activate-dev.sh` script for easy environment activation
+- Set up the project for local testing without modifying your system
+
+To start developing:
+```bash
+# Activate the development environment
+source activate-dev.sh
+
+# This activates the venv and loads the plugin for testing
+# Now you can use ? and ?? commands for testing
+
+# Or manually:
+source venv/bin/activate
+source zsh-llm-debugger.plugin.zsh
+```
+
+### Testing Your Changes
+
+```bash
+# Test debugging a failed command
+? git push
+
+# Test command generation
+?? list all Python files
+
+# Run scripts directly
+./venv/bin/python ollama_debugger.py ...
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.

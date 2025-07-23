@@ -1,39 +1,46 @@
 #!/bin/bash
 
-echo "=== Testing Fixed Streaming Consistency ==="
-echo ""
+# Test script for zsh-llm-debugger streaming fixes
 
-# Test Python script directly first
-echo "1. Testing Python script streaming (working):"
-echo "   Command: echo 'list python files' | python3 ollama_debugger.py GENERATE_MODE /dev/stdin None generate stream"
-echo ""
+echo "=== Testing zsh-llm-debugger Streaming Fixes ==="
+echo
 
-echo "2. Expected behavior comparison:"
-echo ""
+# Test 1: Test ?? command multiple times
+echo "Test 1: Testing ?? command can be used multiple times"
+echo "Please run the following commands in your zsh shell:"
+echo
+echo "1. ?? find all Python files"
+echo "   (wait for suggestion, then press Tab or Enter to accept)"
+echo
+echo "2. ?? list files sorted by size" 
+echo "   (wait for suggestion, then press Tab or Enter to accept)"
+echo
+echo "3. ?? show disk usage of current directory"
+echo "   (wait for suggestion, then press Tab or Enter to accept)"
+echo
+echo "Expected: Each ?? command should:"
+echo "- Show real-time streaming of think content in a box"
+echo "- Display the command generation progress"
+echo "- Show an inline suggestion that can be accepted"
+echo "- Work correctly each time without errors"
+echo
 
-echo "✅ Before Fix - Only ? mode showed streaming:"
-echo "   ? ls /nonexistent     → 💭 Analyzing error... → 🔧 suggestion"
-echo "   ?? find big files     → [no visible activity] → gray suggestion"
-echo "   generate_command '...' → 💭 Thinking... → ▶ command"
-echo ""
+echo "Test 2: Testing ? command with streaming output"
+echo "Please run the following command in your zsh shell:"
+echo
+echo "? find /nonexistent -name '*.py'"
+echo
+echo "Expected:"
+echo "- Command executes and shows error"
+echo "- Real-time streaming of think content in a box"
+echo "- Display suggested fix as it's generated"
+echo "- Show inline suggestion for the fix"
+echo
 
-echo "✅ After Fix - All modes show streaming:"
-echo "   ? ls /nonexistent     → 💭 Analyzing error... → 🔧 suggestion"
-echo "   ?? find big files     → 💭 Thinking... → ⚡ command → gray suggestion"
-echo "   generate_command '...' → 💭 Thinking... → ▶ command"
-echo ""
+echo "Test 3: Verify debug log"
+echo "Run: tail -f ~/.llm_debugger_zsh.log"
+echo "to monitor debug output during testing"
+echo
 
-echo "🎯 Key Fix Applied:"
-echo "   - Changed ?? mode from BUFFER updates to printf terminal output"
-echo "   - Added terminal streaming display like ? mode"
-echo "   - Maintained inline suggestion behavior after streaming"
-echo ""
-
-echo "3. Visual consistency achieved:"
-echo "   💭 = Thinking/analyzing phase (all modes)"
-echo "   🔧 = Debug suggestion (? mode)"
-echo "   ⚡ = Generated command (?? mode)"
-echo "   ▶ = Function output (generate_command mode)"
-echo ""
-
-echo "Ready! All three modes now show real-time streaming activity."
+echo "Press Enter to continue when ready to test..."
+read

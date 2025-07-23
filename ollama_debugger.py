@@ -223,9 +223,10 @@ def execute_function(function_name: str, arguments: dict) -> str:
     else:
         return f"Unknown function: {function_name}"
 
-async def run(model: str, error_details: Dict[str, Any]):
+async def run(model: str, error_details: Dict[str, Any], output_prefix: Optional[str] = None):
     """Run the debugging assistant using OpenAI-compatible API"""
     logging.debug("=== Starting debugging assistant ===")
+    logging.debug(f"Output prefix: {output_prefix}")
     
     # System prompt
     system_prompt = f"""You are an expert command-line debugger assistant specialized in diagnosing and fixing shell command errors.
@@ -239,10 +240,11 @@ Example response format:
 Let me analyze this error...
 [Your step-by-step reasoning here]
 The issue is...
-The solution is...
 </think>
 
-`corrected command here`
+```bash
+[corrected command / solution here]
+```
 
 You have access to these tools to help diagnose issues:
 - list_directory: List directory contents
@@ -265,100 +267,180 @@ IMPORTANT: You MUST include the <think> section before the command to explain yo
         {"role": "user", "content": f"Fix this command: {error_details['command']}"}
     ]
     
-    # Allow up to 5 iterations for tool use
-    for i in range(5):
-        try:
-            # Create chat completion with tools
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=0.1,
-                stream=True
-            )
-            
-            # Process streaming response
-            full_content = ""
-            tool_calls = []
-            current_tool_call = None
-            
-            for chunk in response:
-                if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    full_content += content
-                    # Print each character as it arrives for streaming effect
-                    print(content, end='', flush=True)
+    # Initialize file handles if output prefix is provided
+    thinking_file = None
+    text_file = None
+    thinking_content = ""
+    full_content = ""
+    in_think_tag = False
+    buffer = ""  # Buffer to accumulate content for tag detection
+    
+    if output_prefix:
+        thinking_file = open(f"{output_prefix}_thinking", 'w', buffering=1)
+        text_file = open(f"{output_prefix}_text", 'w', buffering=1)
+    
+    try:
+        # Allow up to 5 iterations for tool use
+        for i in range(5):
+            try:
+                # Create chat completion with tools
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=0.1,
+                    stream=True
+                )
                 
-                # Handle tool calls
-                if chunk.choices[0].delta.tool_calls:
-                    for tool_call_chunk in chunk.choices[0].delta.tool_calls:
-                        if tool_call_chunk.id:
-                            # New tool call
-                            if current_tool_call:
-                                tool_calls.append(current_tool_call)
-                            current_tool_call = {
-                                "id": tool_call_chunk.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call_chunk.function.name if tool_call_chunk.function.name else "",
-                                    "arguments": tool_call_chunk.function.arguments if tool_call_chunk.function.arguments else ""
+                # Process streaming response
+                tool_calls = []
+                current_tool_call = None
+                
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_content += content
+                        
+                        # Parse thinking tags if output files are being used
+                        if output_prefix:
+                            # Add content to buffer
+                            buffer += content
+                            
+                            # Process buffer for complete tags
+                            while True:
+                                if not in_think_tag:
+                                    # Look for <think> tag
+                                    think_start = buffer.find('<think>')
+                                    if think_start != -1:
+                                        # Write content before <think> to text file
+                                        if think_start > 0:
+                                            text_file.write(buffer[:think_start])
+                                            text_file.flush()
+                                        buffer = buffer[think_start + 7:]  # Skip past <think>
+                                        in_think_tag = True
+                                    else:
+                                        # No <think> found, write what we can to text file
+                                        # Keep last 6 chars in buffer in case <think> is split
+                                        if len(buffer) > 6:
+                                            write_len = len(buffer) - 6
+                                            text_file.write(buffer[:write_len])
+                                            text_file.flush()
+                                            buffer = buffer[write_len:]
+                                        break
+                                else:
+                                    # Look for </think> tag
+                                    think_end = buffer.find('</think>')
+                                    if think_end != -1:
+                                        # Write thinking content
+                                        if think_end > 0:
+                                            thinking_file.write(buffer[:think_end])
+                                            thinking_file.flush()
+                                            thinking_content += buffer[:think_end]
+                                        buffer = buffer[think_end + 8:]  # Skip past </think>
+                                        in_think_tag = False
+                                    else:
+                                        # No </think> found, write what we can to thinking file
+                                        # Keep last 7 chars in buffer in case </think> is split
+                                        if len(buffer) > 7:
+                                            write_len = len(buffer) - 7
+                                            thinking_file.write(buffer[:write_len])
+                                            thinking_file.flush()
+                                            thinking_content += buffer[:write_len]
+                                            buffer = buffer[write_len:]
+                                        break
+                        
+                        # Always print to stdout for backward compatibility
+                        print(content, end='', flush=True)
+                    
+                    # Handle tool calls
+                    if chunk.choices[0].delta.tool_calls:
+                        for tool_call_chunk in chunk.choices[0].delta.tool_calls:
+                            if tool_call_chunk.id:
+                                # New tool call
+                                if current_tool_call:
+                                    tool_calls.append(current_tool_call)
+                                current_tool_call = {
+                                    "id": tool_call_chunk.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_call_chunk.function.name if tool_call_chunk.function.name else "",
+                                        "arguments": tool_call_chunk.function.arguments if tool_call_chunk.function.arguments else ""
+                                    }
                                 }
-                            }
+                            else:
+                                # Continuing current tool call
+                                if current_tool_call and tool_call_chunk.function:
+                                    if tool_call_chunk.function.name:
+                                        current_tool_call["function"]["name"] += tool_call_chunk.function.name
+                                    if tool_call_chunk.function.arguments:
+                                        current_tool_call["function"]["arguments"] += tool_call_chunk.function.arguments
+                
+                # Add final tool call if exists
+                if current_tool_call:
+                    tool_calls.append(current_tool_call)
+                
+                # Add assistant's response to messages
+                assistant_message = {"role": "assistant", "content": full_content}
+                if tool_calls:
+                    assistant_message["tool_calls"] = tool_calls
+                messages.append(assistant_message)
+                
+                # If there are tool calls, execute them
+                if tool_calls:
+                    logging.debug(f"Executing {len(tool_calls)} tool calls")
+                    for tool_call in tool_calls:
+                        function_name = tool_call["function"]["name"]
+                        try:
+                            arguments = json.loads(tool_call["function"]["arguments"])
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        
+                        # Execute the function
+                        result = execute_function(function_name, arguments)
+                        
+                        # Add tool response to messages
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": result
+                        })
+                    
+                    # Continue the loop to get the next response
+                    continue
+                else:
+                    # No tool calls, we're done
+                    # Flush any remaining buffer content
+                    if output_prefix and buffer:
+                        if in_think_tag:
+                            thinking_file.write(buffer)
+                            thinking_file.flush()
                         else:
-                            # Continuing current tool call
-                            if current_tool_call and tool_call_chunk.function:
-                                if tool_call_chunk.function.name:
-                                    current_tool_call["function"]["name"] += tool_call_chunk.function.name
-                                if tool_call_chunk.function.arguments:
-                                    current_tool_call["function"]["arguments"] += tool_call_chunk.function.arguments
-            
-            # Add final tool call if exists
-            if current_tool_call:
-                tool_calls.append(current_tool_call)
-            
-            # Add assistant's response to messages
-            assistant_message = {"role": "assistant", "content": full_content}
-            if tool_calls:
-                assistant_message["tool_calls"] = tool_calls
-            messages.append(assistant_message)
-            
-            # If there are tool calls, execute them
-            if tool_calls:
-                logging.debug(f"Executing {len(tool_calls)} tool calls")
-                for tool_call in tool_calls:
-                    function_name = tool_call["function"]["name"]
-                    try:
-                        arguments = json.loads(tool_call["function"]["arguments"])
-                    except json.JSONDecodeError:
-                        arguments = {}
+                            text_file.write(buffer)
+                            text_file.flush()
                     
-                    # Execute the function
-                    result = execute_function(function_name, arguments)
+                    if full_content:
+                        print()  # Add newline after streaming
+                        
+                        # Extract just the command from the response (remove think tags)
+                        # This is done by the Zsh plugin now, so we output the full response
+                        logging.debug(f"Full response with think tags: {full_content}")
+                    break
                     
-                    # Add tool response to messages
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": result
-                    })
-                
-                # Continue the loop to get the next response
-                continue
-            else:
-                # No tool calls, we're done
-                if full_content:
-                    print()  # Add newline after streaming
-                    
-                    # Extract just the command from the response (remove think tags)
-                    # This is done by the Zsh plugin now, so we output the full response
-                    logging.debug(f"Full response with think tags: {full_content}")
+            except Exception as e:
+                logging.exception("Error in API call")
+                error_msg = f"cd {error_details.get('pwd', '.')}"
+                print(error_msg, flush=True)
+                if text_file:
+                    text_file.write(error_msg)
+                    text_file.flush()
                 break
-                
-        except Exception as e:
-            logging.exception("Error in API call")
-            print(f"cd {error_details.get('pwd', '.')}", flush=True)
-            break
+    finally:
+        # Close files if they were opened
+        if thinking_file:
+            thinking_file.close()
+        if text_file:
+            text_file.close()
 
 def extract_command_from_markdown(text: str) -> str:
     """Extract command from markdown code blocks, removing think tags"""
@@ -385,10 +467,11 @@ def extract_command_from_markdown(text: str) -> str:
     # If still no code blocks, return the original text stripped
     return text.strip()
 
-async def generate_command_from_prompt(model: str, prompt: str, stream_mode: bool = False):
+async def generate_command_from_prompt(model: str, prompt: str, stream_mode: bool = False, output_prefix: Optional[str] = None):
     """Generate a command from a natural language prompt"""
     logging.debug(f"=== Starting command generation (stream_mode={stream_mode}) ===")
     logging.debug(f"Prompt: {prompt}")
+    logging.debug(f"Output prefix: {output_prefix}")
     
     # System prompt for command generation
     system_prompt = """You are a helpful command-line assistant that generates shell commands from natural language descriptions.
@@ -421,6 +504,18 @@ IMPORTANT: You MUST include the <think> section before the command. Think about:
         {"role": "user", "content": prompt}
     ]
     
+    # Initialize file handles if output prefix is provided
+    thinking_file = None
+    text_file = None
+    thinking_content = ""
+    in_think_tag = False
+    buffer = ""  # Buffer to accumulate content for tag detection
+    
+    if output_prefix:
+        thinking_file = open(f"{output_prefix}_thinking", 'w', buffering=1)
+        text_file = open(f"{output_prefix}_text", 'w', buffering=1)
+        logging.debug(f"Opened output files: {output_prefix}_thinking and {output_prefix}_text")
+    
     try:
         response = client.chat.completions.create(
             model=model,
@@ -434,10 +529,75 @@ IMPORTANT: You MUST include the <think> section before the command. Think about:
             if chunk.choices[0].delta.content:
                 content = chunk.choices[0].delta.content
                 full_response += content
+                
+                # Parse thinking tags if output files are being used
+                if output_prefix:
+                    # Add content to buffer
+                    buffer += content
+                    logging.debug(f"Buffer now has {len(buffer)} chars, in_think_tag={in_think_tag}")
+                    
+                    # Process buffer for complete tags
+                    while True:
+                        if not in_think_tag:
+                            # Look for <think> tag
+                            think_start = buffer.find('<think>')
+                            if think_start != -1:
+                                # Write content before <think> to text file
+                                if think_start > 0:
+                                    text_file.write(buffer[:think_start])
+                                    text_file.flush()
+                                    logging.debug(f"Wrote {think_start} chars to text file before <think>")
+                                buffer = buffer[think_start + 7:]  # Skip past <think>
+                                in_think_tag = True
+                                logging.debug("Entered think tag mode")
+                            else:
+                                # No <think> found, write what we can to text file
+                                # Keep last 6 chars in buffer in case <think> is split
+                                if len(buffer) > 6:
+                                    write_len = len(buffer) - 6
+                                    text_file.write(buffer[:write_len])
+                                    text_file.flush()
+                                    buffer = buffer[write_len:]
+                                break
+                        else:
+                            # Look for </think> tag
+                            think_end = buffer.find('</think>')
+                            if think_end != -1:
+                                # Write thinking content
+                                if think_end > 0:
+                                    thinking_file.write(buffer[:think_end])
+                                    thinking_file.flush()
+                                    thinking_content += buffer[:think_end]
+                                    logging.debug(f"Wrote {think_end} chars to thinking file")
+                                buffer = buffer[think_end + 8:]  # Skip past </think>
+                                in_think_tag = False
+                                logging.debug("Exited think tag mode")
+                            else:
+                                # No </think> found, write what we can to thinking file
+                                # Keep last 7 chars in buffer in case </think> is split
+                                if len(buffer) > 7:
+                                    write_len = len(buffer) - 7
+                                    thinking_file.write(buffer[:write_len])
+                                    thinking_file.flush()
+                                    thinking_content += buffer[:write_len]
+                                    buffer = buffer[write_len:]
+                                break
+                
                 if stream_mode:
                     # In stream mode, print each character as it arrives
                     # The Zsh plugin will handle parsing and display
                     print(content, end='', flush=True)
+        
+        # Flush any remaining buffer content
+        if output_prefix and buffer:
+            if in_think_tag:
+                thinking_file.write(buffer)
+                thinking_file.flush()
+                logging.debug(f"Flushed {len(buffer)} remaining chars to thinking file")
+            else:
+                text_file.write(buffer)
+                text_file.flush()
+                logging.debug(f"Flushed {len(buffer)} remaining chars to text file")
         
         if stream_mode:
             # Ensure we end with a newline
@@ -450,7 +610,19 @@ IMPORTANT: You MUST include the <think> section before the command. Think about:
             
     except Exception as e:
         logging.exception("Error generating command")
-        print("echo 'Error generating command'", flush=True)
+        error_msg = "echo 'Error generating command'"
+        print(error_msg, flush=True)
+        if text_file:
+            text_file.write(error_msg)
+            text_file.flush()
+    finally:
+        # Close files if they were opened
+        if thinking_file:
+            thinking_file.close()
+            logging.debug("Closed thinking file")
+        if text_file:
+            text_file.close()
+            logging.debug("Closed text file")
 
 def gather_error_details_from_files(command: str, output_file: str, timing_file: str, capture_method: str) -> Dict[str, Any]:
     """Gather error details from the provided files"""
@@ -518,9 +690,19 @@ if __name__ == "__main__":
     logging.debug("=== Script started ===")
     logging.debug(f"Arguments: {sys.argv}")
     
-    if len(sys.argv) == 2:
+    # Check if an output prefix was provided as the last argument
+    output_prefix = None
+    args = sys.argv[:]
+    if len(args) > 2 and args[-1].startswith("--output-prefix="):
+        output_prefix = args[-1].split("=", 1)[1]
+        args = args[:-1]  # Remove the output prefix from args
+        logging.debug(f"Output prefix: {output_prefix}")
+    else:
+        logging.debug("No output prefix provided")
+    
+    if len(args) == 2:
         # Single argument mode - JSON file with error details
-        error_details_file = sys.argv[1]
+        error_details_file = args[1]
         logging.debug(f"Reading error details from file: {error_details_file}")
         try:
             with open(error_details_file, 'r') as f:
@@ -539,14 +721,14 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Run the async function to interact with the model for debugging
-        asyncio.run(run(MODEL, error_details))
+        asyncio.run(run(MODEL, error_details, output_prefix))
 
-    elif len(sys.argv) >= 5:
+    elif len(args) >= 5:
         # Check if first argument is GENERATE_MODE
-        if sys.argv[1] == "GENERATE_MODE":
+        if args[1] == "GENERATE_MODE":
             # Generate mode: python script.py GENERATE_MODE <prompt_file> <ignored> <ignored> [stream]
-            prompt_file = sys.argv[2]
-            stream_mode = len(sys.argv) > 5 and sys.argv[5] == "stream"
+            prompt_file = args[2]
+            stream_mode = len(args) > 5 and args[5] == "stream"
             
             if not os.path.exists(prompt_file):
                 logging.error(f"Prompt file not found: {prompt_file}")
@@ -559,7 +741,7 @@ if __name__ == "__main__":
                 logging.debug(f"Loaded prompt: {prompt}")
                 
                 # Run the async function to generate command
-                asyncio.run(generate_command_from_prompt(MODEL, prompt, stream_mode))
+                asyncio.run(generate_command_from_prompt(MODEL, prompt, stream_mode, output_prefix))
                 
             except Exception as e:
                 logging.exception(f"Error reading prompt file: {prompt_file}")
@@ -567,20 +749,20 @@ if __name__ == "__main__":
                 sys.exit(1)
         else:
             # Debug mode: python script.py <command> <output_file> <timing_file> <capture_method>
-            command = sys.argv[1]
-            output_file = sys.argv[2]
-            timing_file = sys.argv[3] if sys.argv[3] != "None" else None
-            capture_method = sys.argv[4]
+            command = args[1]
+            output_file = args[2]
+            timing_file = args[3] if args[3] != "None" else None
+            capture_method = args[4]
             
             error_details = gather_error_details_from_files(command, output_file, timing_file, capture_method)
             logging.debug(f"Generated error details: {error_details}")
             
             # Run the async function to interact with the model for debugging
-            asyncio.run(run(MODEL, error_details))
+            asyncio.run(run(MODEL, error_details, output_prefix))
 
     else:
         logging.error("Invalid arguments")
-        print("Usage: python ollama_debugger.py <error_details_json_file>")
-        print("   or: python ollama_debugger.py <command> <output_file> <timing_file> <capture_method>")
-        print("   or: python ollama_debugger.py GENERATE_MODE <prompt_file> <ignored> <ignored> [stream]")
+        print("Usage: python ollama_debugger.py <error_details_json_file> [--output-prefix=PREFIX]")
+        print("   or: python ollama_debugger.py <command> <output_file> <timing_file> <capture_method> [--output-prefix=PREFIX]")
+        print("   or: python ollama_debugger.py GENERATE_MODE <prompt_file> <ignored> <ignored> [stream] [--output-prefix=PREFIX]")
         sys.exit(1)

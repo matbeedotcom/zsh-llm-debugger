@@ -7,7 +7,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 source "$SCRIPT_DIR/venv/bin/activate"
 
 # Run the Python script with all arguments
-python "$SCRIPT_DIR/ollama_debugger.py" "$@"
+python3 "$SCRIPT_DIR/ollama_debugger.py" "$@"
 
 # Exit with the same code as the Python script
 exit $?
