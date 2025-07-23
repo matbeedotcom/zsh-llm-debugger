@@ -77,4 +77,27 @@ If the LLM doesn't include think tags (older models), the plugin shows a generic
 1. **Transparency**: Users can see the LLM's reasoning process
 2. **Trust**: Understanding why a command is suggested builds confidence
 3. **Learning**: Users can learn from the LLM's problem-solving approach
-4. **Consistency**: Same beautiful UI across all modes of operation 
+4. **Consistency**: Same beautiful UI across all modes of operation
+
+## Updates and Fixes
+
+### Streaming Timing Fix (Latest)
+Fixed an issue where the thinking box would display generic messages ("Analyzing your request...") before the actual think content arrived from the LLM. The plugin now:
+
+1. Shows "Generating command..." initially while waiting for the stream
+2. Only creates the thinking box when it detects the actual `<think>` tag
+3. Displays thinking content progressively as it streams in
+4. Falls back to generic messages only if substantial content (>500 bytes) arrives without think tags
+
+This ensures users see the actual LLM reasoning instead of placeholder text.
+
+### Duplicate Content Fix
+Fixed an issue where the LLM would output duplicate think content, causing multiple thinking boxes to appear. The plugin now:
+
+1. Tracks whether a thinking box has already been created with `think_box_started` flag
+2. Only displays content updates if they differ significantly from what's already shown
+3. Updates content in-place by clearing previous lines before redrawing
+4. Suppresses background job control messages by wrapping commands in `{ }` blocks
+5. Uses proper state tracking (`think_displayed=2`) to ensure the box is only closed once
+
+This provides a clean, single thinking box that updates smoothly as content streams in. 

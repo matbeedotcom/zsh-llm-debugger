@@ -1049,10 +1049,11 @@ llm_debugger_generate_command_interactive_sync() {
     # Use a simple file for communication
     local result_file="/tmp/llm_debugger_generate_result"
     local temp_prompt="/tmp/llm_debugger_$$_prompt_sync"
+    local stream_file="/tmp/llm_debugger_$$_stream_sync"
     echo "$prompt" >"$temp_prompt"
 
     # Clean up any existing result file
-    rm -f "$result_file"
+    rm -f "$result_file" "$stream_file"
 
     # Reset state
     llm_debugger_suggestion=""
@@ -1067,60 +1068,198 @@ llm_debugger_generate_command_interactive_sync() {
     local term_width=$(tput cols)
     local box_width=$((term_width > 80 ? 80 : term_width - 4))
     
-    # Show thinking box
-    printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
-    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
-    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
-    printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
-    printf "\033[32m▶\033[0m Generating command..."
+    # Show initial status
+    printf "\n\033[32m▶\033[0m Generating command..."
 
-    # Run the Python script synchronously (no streaming)
-    # Run synchronously to avoid job control messages
-    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" >"$result_file" 2>/dev/null
+    # Run the Python script synchronously with streaming output
+    # Redirect stderr to /dev/null to suppress job control messages
+    {
+        "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null
+    } &
+    local python_pid=$!
+    
+    # Monitor the streaming output
+    local last_size=0
+    local current_content=""
+    local in_think=0
+    local think_content=""
+    local think_displayed=0
+    local think_box_started=0
+    local generated_command=""
+    local found_think_tag=0
+    local last_displayed_think=""
+    local think_start_line=0
+    local current_line=0
+    
+    while kill -0 "$python_pid" 2>/dev/null; do
+        if [[ -f "$stream_file" ]]; then
+            local current_size=$(wc -c <"$stream_file" 2>/dev/null || echo "0")
+            if [[ $current_size -gt $last_size ]]; then
+                # Read new content
+                local new_content=$(tail -c +$((last_size + 1)) "$stream_file" 2>/dev/null)
+                current_content+="$new_content"
+                
+                # Check for <think> tag
+                if [[ "$current_content" == *"<think>"* && $in_think -eq 0 ]]; then
+                    in_think=1
+                    found_think_tag=1
+                    think_content=""
+                    
+                    if [[ $think_box_started -eq 0 ]]; then
+                        # Clear the "Generating command..." line
+                        printf "\r\033[2K"
+                        
+                        # Start the thinking box
+                        printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+                        think_box_started=1
+                        think_start_line=$(tput lines)
+                        current_line=0
+                    fi
+                fi
+                
+                # Process thinking content
+                if [[ $in_think -eq 1 ]]; then
+                    # Extract content between current position and </think> or end
+                    local temp_content="$current_content"
+                    temp_content="${temp_content#*<think>}"
+                    
+                    if [[ "$temp_content" == *"</think>"* ]]; then
+                        # Found closing tag
+                        think_content="${temp_content%%</think>*}"
+                        in_think=0
+                        
+                        # Only display if content has changed significantly
+                        if [[ "$think_content" != "$last_displayed_think"* ]] || [[ ${#think_content} -gt $((${#last_displayed_think} + 100)) ]]; then
+                            # Clear previous thinking lines if we need to redraw
+                            if [[ $current_line -gt 0 ]]; then
+                                for ((i=0; i<current_line; i++)); do
+                                    printf "\033[A\033[2K"  # Move up and clear line
+                                done
+                            fi
+                            
+                            current_line=0
+                            # Display the thinking content line by line
+                            while IFS= read -r line; do
+                                # Skip empty lines at the beginning
+                                [[ -z "$line" && $think_displayed -eq 0 ]] && continue
+                                think_displayed=1
+                                
+                                # Word wrap long lines
+                                while [[ ${#line} -gt $((box_width - 4)) ]]; do
+                                    local wrap_point=$((box_width - 4))
+                                    # Find last space before wrap point
+                                    local i=$wrap_point
+                                    while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
+                                        ((i--))
+                                    done
+                                    if [[ $i -eq 0 ]]; then
+                                        i=$wrap_point
+                                    fi
+                                    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
+                                    line="${line:$((i + 1))}"
+                                    ((current_line++))
+                                done
+                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                                ((current_line++))
+                            done <<< "$think_content"
+                            
+                            last_displayed_think="$think_content"
+                        fi
+                        
+                        # Close the thinking box only once
+                        if [[ $think_displayed -eq 1 ]]; then
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            think_displayed=2  # Mark as fully displayed
+                            
+                            # Show command prompt
+                            printf "\033[32m▶\033[0m "
+                        fi
+                    fi
+                elif [[ $think_displayed -eq 2 ]] || [[ $found_think_tag -eq 0 && $current_size -gt 500 ]]; then
+                    # After thinking OR if no think tags but we have substantial content
+                    if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
+                        # No think tags found after substantial content - show generic message
+                        printf "\r\033[2K"
+                        printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
+                        printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                        think_displayed=2
+                        printf "\033[32m▶\033[0m "
+                    fi
+                    
+                    # Extract command from markdown
+                    local content_to_parse="$current_content"
+                    if [[ $found_think_tag -eq 1 ]]; then
+                        content_to_parse="${current_content#*</think>}"
+                    fi
+                    
+                    if [[ "$content_to_parse" == *'```'* ]]; then
+                        local in_code_block="${content_to_parse#*\`\`\`}"
+                        # Skip language identifier
+                        in_code_block="${in_code_block#*$'\n'}"
+                        if [[ "$in_code_block" == *'```'* ]]; then
+                            generated_command="${in_code_block%%\`\`\`*}"
+                            generated_command="${generated_command%$'\n'}"
+                            # Update display with generated command
+                            printf "\r\033[2K\033[32m▶\033[0m %s" "$generated_command"
+                        fi
+                    fi
+                fi
+                
+                last_size=$current_size
+            fi
+        fi
+        sleep 0.05
+    done
+    
+    # Wait for completion
+    wait $python_pid 2>/dev/null
     local exit_code=$?
-
-    # Clear the thinking line
+    
+    # If we didn't extract a command during streaming, try from the final output
+    if [[ -z "$generated_command" && -f "$stream_file" ]]; then
+        local full_content=$(cat "$stream_file")
+        # Remove think tags and content
+        full_content="${full_content#*</think>}"
+        # Extract from markdown code block
+        if [[ "$full_content" == *'```'* ]]; then
+            local in_code_block="${full_content#*\`\`\`}"
+            in_code_block="${in_code_block#*$'\n'}"
+            if [[ "$in_code_block" == *'```'* ]]; then
+                generated_command="${in_code_block%%\`\`\`*}"
+                generated_command="${generated_command%$'\n'}"
+            fi
+        fi
+    fi
+    
+    # Clean up the command
+    generated_command="${generated_command## }"
+    generated_command="${generated_command%% }"
+    
+    # Clear the line
     printf "\r\033[2K"
 
     # Read the result and set up inline suggestion
-    if [[ $exit_code -eq 0 && -f "$result_file" && -s "$result_file" ]]; then
-        local generated_command=$(cat "$result_file")
-        # Clean up the command
-        generated_command="${generated_command## }"      # Remove leading spaces
-        generated_command="${generated_command%% }"      # Remove trailing spaces
-        generated_command="${generated_command%%$'\n'*}" # Keep only first line
+    if [[ $exit_code -eq 0 && -n "$generated_command" ]]; then
+        # Clear buffer and show suggestion inline (like zsh-autosuggestions)
+        BUFFER=""
+        CURSOR=0
+        llm_debugger_show_inline_suggestion "$generated_command"
 
-        if [[ -n "$generated_command" ]]; then
-            # Clear buffer and show suggestion inline (like zsh-autosuggestions)
-            BUFFER=""
-            CURSOR=0
-            llm_debugger_show_inline_suggestion "$generated_command"
-
-            # Store suggestion data
-            llm_debugger_suggestion="$generated_command"
-            llm_debugger_has_suggestion=1
-            llm_debugger_debug "Set up inline suggestion: '$generated_command'"
-        else
-            BUFFER=""
-            CURSOR=0
-            printf "\033[91mNo command generated (empty output)\033[0m\n"
-            llm_debugger_debug "Generated command was empty"
-        fi
+        # Store suggestion data
+        llm_debugger_suggestion="$generated_command"
+        llm_debugger_has_suggestion=1
+        llm_debugger_debug "Set up inline suggestion: '$generated_command'"
     else
         BUFFER=""
         CURSOR=0
-        printf "\033[91mError: Failed to generate command (exit code: $exit_code)\033[0m\n"
-        llm_debugger_debug "Command generation failed - exit code: $exit_code"
-        if [[ -f "$result_file" ]]; then
-            # Avoid command substitution in debug calls to prevent recursion
-            local result_contents
-            result_contents=$(cat "$result_file" 2>/dev/null)
-            llm_debugger_debug "Result file contents: $result_contents"
-        fi
+        printf "\033[91mNo command generated\033[0m\n"
+        llm_debugger_debug "Generated command was empty or exit code was non-zero"
     fi
 
     # Clean up temp files
-    rm -f "$temp_prompt" "$result_file"
+    rm -f "$temp_prompt" "$result_file" "$stream_file"
 
     # Redraw
     zle redisplay
@@ -1241,7 +1380,9 @@ llm_debugger_generate_command() {
     # Start the Python script in streaming mode, redirecting to stream file
     # Suppress job control messages before starting background process
     llm_debugger_suppress_jobs
-    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null &
+    {
+        "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null
+    } &
     local python_pid=$!
     llm_debugger_debug "Started ollama_debugger.py in streaming mode with PID $python_pid"
 
@@ -1252,16 +1393,19 @@ llm_debugger_generate_command() {
     local in_think=0
     local think_content=""
     local think_displayed=0
+    local think_box_started=0
     local final_command=""
     local found_think_tag=0
+    local last_displayed_think=""
+    local think_start_line=0
+    local current_line=0
 
     # Terminal width for formatting
     local term_width=$(tput cols)
     local box_width=$((term_width > 80 ? 80 : term_width - 4))
     
-    # Show initial thinking animation
-    printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
-    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
+    # Show initial status
+    printf "\n\033[32m▶\033[0m Generating command..."
 
     while kill -0 "$python_pid" 2>/dev/null; do
         if [[ -f "$stream_file" ]]; then
@@ -1276,7 +1420,14 @@ llm_debugger_generate_command() {
                     in_think=1
                     found_think_tag=1
                     think_content=""
-                    # We already showed the thinking header, just continue
+                    
+                    if [[ $think_box_started -eq 0 ]]; then
+                        # Clear the "Generating command..." line and start box
+                        printf "\r\033[2K"
+                        printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+                        think_box_started=1
+                        current_line=0
+                    fi
                 fi
 
                 # Process thinking content
@@ -1290,42 +1441,63 @@ llm_debugger_generate_command() {
                         think_content="${temp_content%%</think>*}"
                         in_think=0
                         
-                        # Display the thinking content line by line
-                        while IFS= read -r line; do
-                            # Word wrap long lines
-                            while [[ ${#line} -gt $((box_width - 4)) ]]; do
-                                local wrap_point=$((box_width - 4))
-                                # Find last space before wrap point
-                                local i=$wrap_point
-                                while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
-                                    ((i--))
+                        # Only display if content has changed significantly
+                        if [[ "$think_content" != "$last_displayed_think"* ]] || [[ ${#think_content} -gt $((${#last_displayed_think} + 100)) ]]; then
+                            # Clear previous thinking lines if we need to redraw
+                            if [[ $current_line -gt 0 ]]; then
+                                for ((i=0; i<current_line; i++)); do
+                                    printf "\033[A\033[2K"  # Move up and clear line
                                 done
-                                if [[ $i -eq 0 ]]; then
-                                    i=$wrap_point
-                                fi
-                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
-                                line="${line:$((i + 1))}"
-                            done
-                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
-                        done <<< "$think_content"
+                            fi
+                            
+                            current_line=0
+                            # Display the thinking content line by line
+                            while IFS= read -r line; do
+                                # Skip empty lines at the beginning
+                                [[ -z "$line" && $think_displayed -eq 0 ]] && continue
+                                think_displayed=1
+                                
+                                # Word wrap long lines
+                                while [[ ${#line} -gt $((box_width - 4)) ]]; do
+                                    local wrap_point=$((box_width - 4))
+                                    # Find last space before wrap point
+                                    local i=$wrap_point
+                                    while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
+                                        ((i--))
+                                    done
+                                    if [[ $i -eq 0 ]]; then
+                                        i=$wrap_point
+                                    fi
+                                    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
+                                    line="${line:$((i + 1))}"
+                                    ((current_line++))
+                                done
+                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                                ((current_line++))
+                            done <<< "$think_content"
+                            
+                            last_displayed_think="$think_content"
+                        fi
                         
-                        # Close the thinking box
-                        printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
-                        think_displayed=1
-                        
-                        # Show command prompt
-                        printf "\033[32m▶\033[0m Generating command..."
-                    else
-                        # Still collecting thinking content
-                        think_content="$temp_content"
+                        # Close the thinking box only once
+                        if [[ $think_displayed -eq 1 ]]; then
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            think_displayed=2  # Mark as fully displayed
+                            
+                            # Show command prompt
+                            printf "\033[32m▶\033[0m Generating command..."
+                        fi
                     fi
-                elif [[ $think_displayed -eq 1 ]] || [[ "$current_content" == *'```'* && $found_think_tag -eq 0 ]]; then
+                elif [[ $think_displayed -eq 2 ]] || [[ "$current_content" == *'```'* && $found_think_tag -eq 0 ]]; then
                     # After thinking OR if no think tags but we see code blocks
-                    if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
-                        # No think tags found, but we have a code block - show generic thinking done
+                    if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 && $current_size -gt 500 ]]; then
+                        # No think tags found after substantial content - show generic thinking done
+                        printf "\r\033[2K"
+                        printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
                         printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
                         printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
-                        think_displayed=1
+                        think_displayed=2
                         printf "\033[32m▶\033[0m Generating command..."
                     fi
                     
@@ -1355,7 +1527,7 @@ llm_debugger_generate_command() {
     done
 
     # Wait for completion and read final result
-    wait $python_pid
+    wait $python_pid 2>/dev/null
 
     # Copy stream file to result file for final processing
     if [[ -f "$stream_file" ]]; then
