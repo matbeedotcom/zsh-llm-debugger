@@ -368,8 +368,23 @@ llm_debugger_execute_and_analyze() {
         printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Examining the error output..."
 
         # Use proper debug mode with tools and few-shot examples - capture streaming output
+        # Temporarily disable monitor to prevent job control messages
+        local old_monitor
+        if [[ -o monitor ]]; then
+            old_monitor=1
+            setopt NO_MONITOR
+        else
+            old_monitor=0
+        fi
+        
         "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$stream_file" 2>&1 &
         local python_pid=$!
+        disown  # This prevents job control messages
+        
+        # Restore monitor option if it was set
+        if [[ $old_monitor -eq 1 ]]; then
+            setopt MONITOR
+        fi
         
         # Monitor the streaming output
         local last_size=0
@@ -867,8 +882,23 @@ llm_debugger_execute_and_analyze_sync() {
         printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Examining the error output..."
         
         # Run the Python script and capture streaming output
+        # Temporarily disable monitor to prevent job control messages
+        local old_monitor
+        if [[ -o monitor ]]; then
+            old_monitor=1
+            setopt NO_MONITOR
+        else
+            old_monitor=0
+        fi
+        
         "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$stream_file" 2>&1 &
         local python_pid=$!
+        disown  # This prevents job control messages
+        
+        # Restore monitor option if it was set
+        if [[ $old_monitor -eq 1 ]]; then
+            setopt MONITOR
+        fi
         
         # Monitor the streaming output
         local last_size=0
@@ -924,114 +954,110 @@ llm_debugger_execute_and_analyze_sync() {
                                     fi
                                     printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
                                     line="${line:$((i + 1))}"
+                                    ((current_line++))
                                 done
                                 printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                                ((current_line++))
                             done <<< "$think_content"
                             
-                            # Close the thinking box
+                            last_displayed_think="$think_content"
+                        fi
+                        
+                        # Close the thinking box only once
+                        if [[ $think_displayed -eq 1 ]]; then
                             printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            think_displayed=2  # Mark as fully displayed
                             
                             # Show command prompt
-                            printf "\033[32m▶\033[0m Suggested fix: "
-                        else
-                            # Still collecting thinking content
-                            think_content="$temp_content"
-                        fi
-                    elif [[ $think_displayed -eq 1 ]] || [[ $found_think_tag -eq 0 && $current_size -gt 100 ]]; then
-                        # After thinking OR if no think tags but we have content
-                        if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
-                            # No think tags found - show generic message and close box
-                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Identifying the issue..."
-                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best fix..."
-                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
-                            think_displayed=1
-                            printf "\033[32m▶\033[0m Suggested fix: "
-                        fi
-                        
-                        # Extract command after think tags
-                        local content_to_parse="$current_content"
-                        if [[ $found_think_tag -eq 1 ]]; then
-                            content_to_parse="${current_content#*</think>}"
-                        fi
-                        
-                        # Extract command from various formats
-                        # Look for backtick-wrapped commands
-                        if [[ "$content_to_parse" == *'`'*'`'* ]]; then
-                            suggested_command="${content_to_parse#*\`}"
-                            suggested_command="${suggested_command%%\`*}"
-                            suggested_command="${suggested_command%$'\n'}"
-                            suggested_command="${suggested_command#$'\n'}"
-                            # Update display
-                            printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
-                        else
-                            # Fallback: take first non-empty line after think
-                            suggested_command=$(echo "$content_to_parse" | grep -v '^[[:space:]]*$' | head -1)
-                            if [[ -n "$suggested_command" ]]; then
-                                printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
-                            fi
+                            printf "\033[32m▶\033[0m "
                         fi
                     fi
+                elif [[ $think_displayed -eq 2 ]] || [[ $found_think_tag -eq 0 && $current_size -gt 100 ]]; then
+                    # After thinking OR if no think tags but we have content
+                    if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
+                        # No think tags found - show generic message and close box
+                        printf "\r\033[2K"
+                        printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
+                        printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                        think_displayed=2
+                        printf "\033[32m▶\033[0m "
+                    fi
                     
-                    last_size=$current_size
+                    # Extract command from markdown
+                    local content_to_parse="$current_content"
+                    if [[ $found_think_tag -eq 1 ]]; then
+                        content_to_parse="${current_content#*</think>}"
+                    fi
+                    
+                    if [[ "$content_to_parse" == *'```'* ]]; then
+                        local in_code_block="${content_to_parse#*\`\`\`}"
+                        # Skip language identifier
+                        in_code_block="${in_code_block#*$'\n'}"
+                        if [[ "$in_code_block" == *'```'* ]]; then
+                            generated_command="${in_code_block%%\`\`\`*}"
+                            generated_command="${generated_command%$'\n'}"
+                            # Update display with generated command
+                            printf "\r\033[2K\033[32m▶\033[0m %s" "$generated_command"
+                        fi
+                    fi
                 fi
-            fi
-            sleep 0.05
-        done
-        
-        # Wait for completion
-        wait $python_pid
-        local exit_code=$?
-        
-        # If we didn't extract a command during streaming, try from the final output
-        if [[ -z "$suggested_command" && -f "$stream_file" ]]; then
-            local full_content=$(cat "$stream_file")
-            # Remove think tags
-            full_content="${full_content#*</think>}"
-            # Try to extract command
-            if [[ "$full_content" == *'`'*'`'* ]]; then
-                suggested_command="${full_content#*\`}"
-                suggested_command="${suggested_command%%\`*}"
-            else
-                suggested_command=$(echo "$full_content" | grep -v '^[[:space:]]*$' | head -1)
+                
+                last_size=$current_size
             fi
         fi
-        
-        # Clean up the command
-        suggested_command="${suggested_command## }"      # Remove leading spaces
-        suggested_command="${suggested_command%% }"      # Remove trailing spaces
-        suggested_command="${suggested_command%%$'\n'*}" # Keep only first line
-        
-        # Clear the line
-        printf "\r\033[2K"
-
-        # Read the result and set up inline suggestion
-        if [[ $exit_code -eq 0 && -n "$suggested_command" ]]; then
-            # Display the final suggestion as a message first
-            local my_yellow=$'\e[33m'
-            local my_reset=$'\e[0m'
-            local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
-            print -- "$message"
-
-            # Clear buffer and show suggestion inline (like zsh-autosuggestions)
-            BUFFER=""
-            CURSOR=0
-            llm_debugger_show_inline_suggestion "$suggested_command"
-
-            # Store suggestion data
-            llm_debugger_suggestion="$suggested_command"
-            llm_debugger_has_suggestion=1
-            llm_debugger_debug "Set up inline suggestion for ? command: '$suggested_command'"
+        sleep 0.05
+    done
+    
+    # Wait for completion
+    wait $python_pid 2>/dev/null
+    local exit_code=$?
+    
+    # If we didn't extract a command during streaming, try from the final output
+    if [[ -z "$suggested_command" && -f "$stream_file" ]]; then
+        local full_content=$(cat "$stream_file")
+        # Remove think tags
+        full_content="${full_content#*</think>}"
+        # Try to extract command
+        if [[ "$full_content" == *'`'*'`'* ]]; then
+            suggested_command="${full_content#*\`}"
+            suggested_command="${suggested_command%%\`*}"
         else
-            BUFFER=""
-            CURSOR=0
-            printf "\033[91mNo suggestion generated\033[0m\n"
-            llm_debugger_debug "Failed to generate suggestion - exit code: $exit_code"
+            suggested_command=$(echo "$full_content" | grep -v '^[[:space:]]*$' | head -1)
         fi
-    else
-        llm_debugger_debug "Command succeeded, no analysis needed"
-        # Clear buffer since command was successful
+    fi
+    
+    # Clean up the command
+    suggested_command="${suggested_command## }"      # Remove leading spaces
+    suggested_command="${suggested_command%% }"      # Remove trailing spaces
+    suggested_command="${suggested_command%%$'\n'*}" # Keep only first line
+    
+    # Clear the line
+    printf "\r\033[2K"
+
+    # Read the result and set up inline suggestion
+    if [[ $exit_code -eq 0 && -n "$suggested_command" ]]; then
+        # Display the final suggestion as a message first
+        local my_yellow=$'\e[33m'
+        local my_reset=$'\e[0m'
+        local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
+        print -- "$message"
+
+        # Clear buffer and show suggestion inline (like zsh-autosuggestions)
         BUFFER=""
         CURSOR=0
+        llm_debugger_show_inline_suggestion "$suggested_command"
+
+        # Store suggestion data
+        llm_debugger_suggestion="$suggested_command"
+        llm_debugger_has_suggestion=1
+        llm_debugger_debug "Set up inline suggestion for ? command: '$suggested_command'"
+    else
+        BUFFER=""
+        CURSOR=0
+        printf "\033[91mNo suggestion generated\033[0m\n"
+        llm_debugger_debug "Failed to generate suggestion - exit code: $exit_code"
     fi
 
     # Clean up temp files
@@ -1071,12 +1097,25 @@ llm_debugger_generate_command_interactive_sync() {
     # Show initial status
     printf "\n\033[32m▶\033[0m Generating command..."
 
+    # Temporarily disable job control messages
+    local old_monitor
+    if [[ -o monitor ]]; then
+        old_monitor=1
+        setopt NO_MONITOR
+    else
+        old_monitor=0
+    fi
+
     # Run the Python script synchronously with streaming output
-    # Redirect stderr to /dev/null to suppress job control messages
-    {
-        "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null
-    } &
+    # Start the command in background and immediately disown it
+    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null &
     local python_pid=$!
+    disown  # This prevents job control messages
+    
+    # Restore monitor option if it was set
+    if [[ $old_monitor -eq 1 ]]; then
+        setopt MONITOR
+    fi
     
     # Monitor the streaming output
     local last_size=0
@@ -1380,10 +1419,25 @@ llm_debugger_generate_command() {
     # Start the Python script in streaming mode, redirecting to stream file
     # Suppress job control messages before starting background process
     llm_debugger_suppress_jobs
-    {
-        "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null
-    } &
+    
+    # Temporarily disable monitor to prevent job control messages
+    local old_monitor
+    if [[ -o monitor ]]; then
+        old_monitor=1
+        setopt NO_MONITOR
+    else
+        old_monitor=0
+    fi
+    
+    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null &
     local python_pid=$!
+    disown  # This prevents job control messages
+    
+    # Restore monitor option if it was set
+    if [[ $old_monitor -eq 1 ]]; then
+        setopt MONITOR
+    fi
+    
     llm_debugger_debug "Started ollama_debugger.py in streaming mode with PID $python_pid"
 
     # Monitor the streaming output

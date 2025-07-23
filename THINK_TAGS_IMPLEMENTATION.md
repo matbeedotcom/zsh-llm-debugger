@@ -100,4 +100,14 @@ Fixed an issue where the LLM would output duplicate think content, causing multi
 4. Suppresses background job control messages by wrapping commands in `{ }` blocks
 5. Uses proper state tracking (`think_displayed=2`) to ensure the box is only closed once
 
-This provides a clean, single thinking box that updates smoothly as content streams in. 
+This provides a clean, single thinking box that updates smoothly as content streams in.
+
+### Job Control Message Suppression
+Fixed the issue where Zsh job control messages (`[2] 219903` and `[2] + 219903 done`) would appear during command generation. The plugin now:
+
+1. Temporarily disables the `monitor` option with `setopt NO_MONITOR` before starting background jobs
+2. Uses `disown` immediately after starting the background process to detach it from job control
+3. Restores the original `monitor` setting after the process is started
+4. Redirects stderr to `/dev/null` to catch any remaining error output
+
+This ensures a clean output with no shell job control messages interrupting the beautiful UI. 
