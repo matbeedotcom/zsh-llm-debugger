@@ -1,0 +1,1 @@
+recursively search for all configuration files (json, yaml, yml, ini) that contain the word 'database' and show me the line numbers

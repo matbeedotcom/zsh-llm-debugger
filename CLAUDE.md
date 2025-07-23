@@ -44,8 +44,10 @@ tail -f ~/.openai_debugger.log  # OpenAI backend
    - Streaming output processing with visual indicators
    - Key bindings for accepting/rejecting suggestions
 
-2. **ollama_debugger.py**: Python backend for Ollama integration
-   - Uses Qwen3:1.7b model for fast local inference
+2. **ollama_debugger.py**: Python backend using OpenAI-compatible API
+   - Configurable endpoint via LLM_DEBUGGER_BASE_URL (defaults to Ollama)
+   - Configurable model via LLM_DEBUGGER_MODEL
+   - Works with any OpenAI-compatible endpoint (OpenAI, Anthropic, Ollama, etc.)
    - Implements tool calling (filesystem, process inspection)
    - Streaming output with `<think>` tag handling
 

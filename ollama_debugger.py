@@ -1,5 +1,4 @@
 import json
-import ollama
 import asyncio
 import os
 import subprocess
@@ -8,8 +7,9 @@ import shutil
 import logging
 import sys
 import platform
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
+from openai import OpenAI
 
 # Configure logging for verbose output
 logging.basicConfig(
@@ -19,6 +19,21 @@ logging.basicConfig(
         logging.FileHandler("shell_debugger.log")  # Log to a file only
     ]
 )
+
+# Configuration for OpenAI-compatible endpoint
+# Default to Ollama's OpenAI-compatible endpoint
+BASE_URL = os.getenv('LLM_DEBUGGER_BASE_URL', 'http://localhost:11434/v1')
+API_KEY = os.getenv('LLM_DEBUGGER_API_KEY', 'ollama')  # Ollama doesn't require a real key
+MODEL = os.getenv('LLM_DEBUGGER_MODEL', 'qwen2.5:1.5b')
+
+# Initialize OpenAI client with custom base URL
+client = OpenAI(
+    base_url=BASE_URL,
+    api_key=API_KEY
+)
+
+logging.info(f"Using OpenAI-compatible endpoint: {BASE_URL}")
+logging.info(f"Using model: {MODEL}")
 
 # Function Definitions
 
@@ -49,30 +64,37 @@ def list_directory(path: str, options: List[str] = []) -> str:
 def print_working_directory() -> str:
     logging.debug("Entering print_working_directory")
     try:
-        cwd = os.getcwd()
-        logging.debug(f"Current working directory: {cwd}")
-        return cwd
+        pwd = os.getcwd()
+        logging.debug(f"Current working directory: {pwd}")
+        return pwd
     except Exception as e:
-        logging.exception("Error getting current working directory")
-        return f"Error getting current working directory: {str(e)}"
+        logging.exception("Unexpected error in print_working_directory")
+        return f"Unexpected error: {str(e)}"
 
-def list_processes(options: List[str] = []) -> str:
-    logging.debug(f"Entering list_processes with options: {options}")
+def list_processes(filter: str = None) -> str:
+    logging.debug(f"Entering list_processes with filter: {filter}")
     try:
         # Determine the operating system
         system = platform.system()
         logging.debug(f"Operating System detected: {system}")
         if system == "Windows":
-            cmd = ['tasklist'] + options
+            cmd = ['tasklist']
             shell = True
             logging.debug(f"Constructed command for Windows: {' '.join(cmd)}")
         else:
-            cmd = ['ps'] + options
+            cmd = ['ps', 'aux']
             shell = False
             logging.debug(f"Constructed command for Unix: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=shell)
-        logging.debug(f"Command output:\n{result.stdout}")
-        return result.stdout
+        output = result.stdout
+        if filter:
+            lines = output.splitlines()
+            filtered_lines = [line for line in lines if filter.lower() in line.lower()]
+            output = '\n'.join(filtered_lines)
+            logging.debug(f"Filtered output (filter: {filter}):\n{output}")
+        else:
+            logging.debug(f"Full process list:\n{output}")
+        return output
     except subprocess.CalledProcessError as e:
         logging.error(f"Error listing processes: {e.stderr}")
         return f"Error listing processes: {e.stderr}"
@@ -80,705 +102,419 @@ def list_processes(options: List[str] = []) -> str:
         logging.exception("Unexpected error in list_processes")
         return f"Unexpected error: {str(e)}"
 
-def display_file_contents(file_path: str) -> str:
-    logging.debug(f"Entering display_file_contents with file_path: {file_path}")
+def display_file_contents(file_path: str, start_line: int = None, end_line: int = None) -> str:
+    logging.debug(f"Entering display_file_contents with file_path: {file_path}, start_line: {start_line}, end_line: {end_line}")
     try:
         with open(file_path, 'r') as file:
-            contents = file.read()
-        logging.debug(f"Contents of {file_path}:\n{contents}")
-        return contents
+            lines = file.readlines()
+            total_lines = len(lines)
+            logging.debug(f"Total lines in file: {total_lines}")
+            if start_line is None:
+                start_line = 1
+            if end_line is None:
+                end_line = total_lines
+            # Adjust for 0-indexed list
+            start_line = max(1, start_line)
+            end_line = min(total_lines, end_line)
+            content = ''.join(lines[start_line-1:end_line])
+            logging.debug(f"Displaying lines {start_line} to {end_line}")
+            return content
     except FileNotFoundError:
         logging.error(f"File not found: {file_path}")
-        return f"File not found: {file_path}"
+        return f"Error: File not found: {file_path}"
     except Exception as e:
-        logging.exception(f"Error reading file: {file_path}")
-        return f"Error reading file: {str(e)}"
+        logging.exception("Unexpected error in display_file_contents")
+        return f"Unexpected error: {str(e)}"
 
-def execute_shell_command(command: str, env=os.environ) -> (str, str, int):
-    """
-    Executes a shell command and captures its output and exit status.
-    """
-    logging.debug(f"Executing shell command: {command}")
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            executable='/bin/zsh',  # Ensure using ZSH
-            env=env
-        )
-        logging.debug(f"Command executed with exit status: {result.returncode}")
-        logging.debug(f"STDOUT:\n{result.stdout}")
-        logging.debug(f"STDERR:\n{result.stderr}")
-        return result.stdout, result.stderr, result.returncode
-    except Exception as e:
-        logging.exception("Error executing shell command")
-        return '', str(e), 1
-
-def gather_error_details_from_files(command: str, output_file: str, timing_file: str = None, capture_method: str = "traditional") -> Dict[str, Any]:
-    """
-    Gathers detailed error information from script output files.
-    """
-    logging.debug(f"Gathering error details from files: output={output_file}, timing={timing_file}, method={capture_method}")
-    
-    try:
-        # Read the output file
-        script_output = ""
-        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            with open(output_file, 'r') as f:
-                script_output = f.read()
-        
-        # Read timing information if available
-        timing_info = ""
-        if timing_file and timing_file != "None" and os.path.exists(timing_file) and os.path.getsize(timing_file) > 0:
-            with open(timing_file, 'r') as f:
-                timing_info = f.read()
-        
-        # Default to failure exit status
-        exit_status = 1
-        
-        details = {
-            "timestamp": datetime.now().isoformat(),
-            "command": command,
-            "exit_status": exit_status,
-            "stdout": "",  # script combines output
-            "stderr": script_output,  # Put everything in stderr since command failed
-            "working_directory": os.getcwd(),
-            "shell": os.getenv('SHELL', ''),
-            "PATH": os.getenv('PATH', ''),
-            "system_information": subprocess.getoutput('uname -a') if shutil.which('uname') else "System information not available",
-            "os_release": subprocess.getoutput('cat /etc/os-release') if os.path.exists('/etc/os-release') else "OS release information not available",
-            "command_binary_details": subprocess.getoutput(f'which {shlex.split(command)[0]}') if shutil.which(shlex.split(command)[0]) else "Command not found in PATH",
-            "command_version": subprocess.getoutput(f'{shlex.split(command)[0]} --version') if shutil.which(shlex.split(command)[0]) else "Version information not available",
-            "environment_variables": dict(os.environ),
-            "timing_info": timing_info,
-            "capture_method": capture_method
-        }
-        
-        logging.debug(f"Error details gathered: {details}")
-        return details
-        
-    except Exception as e:
-        logging.exception("Error gathering error details from files")
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "command": command,
-            "exit_status": 1,
-            "stdout": "",
-            "stderr": f"Error gathering error details: {str(e)}",
-            "capture_method": capture_method,
-            "error": f"Error gathering error details: {str(e)}"
-        }
-
-def gather_error_details(command: str, exit_status: int, stdout: str, stderr: str) -> Dict[str, Any]:
-    """
-    Gathers detailed error information, including system and environment details.
-    """
-    logging.debug("Gathering error details")
-    try:
-        details = {
-            "timestamp": datetime.now().isoformat(),
-            "command": command,
-            "exit_status": exit_status,
-            "stdout": stdout,
-            "stderr": stderr,
-            "working_directory": os.getcwd(),
-            "shell": os.getenv('SHELL', ''),
-            "PATH": os.getenv('PATH', ''),
-            "system_information": subprocess.getoutput('uname -a') if shutil.which('uname') else "System information not available",
-            "os_release": subprocess.getoutput('cat /etc/os-release') if os.path.exists('/etc/os-release') else "OS release information not available",
-            "command_binary_details": subprocess.getoutput(f'which {shlex.split(command)[0]}') if shutil.which(shlex.split(command)[0]) else "Command not found in PATH",
-            "command_version": subprocess.getoutput(f'{shlex.split(command)[0]} --version') if shutil.which(shlex.split(command)[0]) else "Version information not available",
-            "environment_variables": dict(os.environ)
-        }
-        logging.debug(f"Error details gathered: {details}")
-        return details
-    except Exception as e:
-        logging.exception("Error gathering error details")
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "command": command,
-            "exit_status": exit_status,
-            "stdout": stdout,
-            "stderr": stderr,
-            "error": f"Error gathering error details: {str(e)}"
-        }
-
-# ALLOWED_FUNCTIONS Dictionary
-
-ALLOWED_FUNCTIONS: Dict[str, Dict[str, Any]] = {
-    "list_directory": {
-        "name": "list_directory",
-        "description": "List files and directories in a specified path.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The directory path to list."
+# Tool definitions for OpenAI function calling
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "List the contents of a directory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the directory"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional flags like '-la' for detailed listing"
+                    }
                 },
-                "options": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["-la", "--help"]
-                    },
-                    "description": "Options to modify the behavior of the ls command."
-                }
-            },
-            "required": ["path"]
+                "required": ["path"]
+            }
         }
     },
-    "print_working_directory": {
-        "name": "print_working_directory",
-        "description": "Print the current working directory.",
-        "parameters": {
-            "type": "object",
-            "properties": {}
+    {
+        "type": "function",
+        "function": {
+            "name": "print_working_directory",
+            "description": "Print the current working directory",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
         }
     },
-    "list_processes": {
-        "name": "list_processes",
-        "description": "List currently running processes.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "options": {
-                    "type": "array",
-                    "items": {
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": "List running processes",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter": {
                         "type": "string",
-                        "enum": ["aux", "--help"]
-                    },
-                    "description": "Options to modify the behavior of the ps command."
+                        "description": "Optional filter to search for specific processes"
+                    }
                 }
             }
         }
     },
-    "display_file_contents": {
-        "name": "display_file_contents",
-        "description": "Display the contents of a specified file.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "The path to the file to display."
-                }
-            },
-            "required": ["file_path"]
+    {
+        "type": "function",
+        "function": {
+            "name": "display_file_contents",
+            "description": "Display the contents of a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The path to the file"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "The starting line number (1-indexed)"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "The ending line number (inclusive)"
+                    }
+                },
+                "required": ["file_path"]
+            }
         }
     }
-}
+]
 
-# Mapping of function names to actual Python functions
-AVAILABLE_FUNCTIONS: Dict[str, Any] = {
-    "list_directory": list_directory,
-    "print_working_directory": print_working_directory,
-    "list_processes": list_processes,
-    "display_file_contents": display_file_contents,
-}
-
-# Helper function to extract command from ```sh code blocks
-def extract_command_from_codeblock(content: str) -> str:
-    """Extract command from ```sh code blocks, fallback to original content if no blocks found."""
-    # Look for ```sh code blocks
-    import re
+def execute_function(function_name: str, arguments: dict) -> str:
+    """Execute a function based on the function name and arguments"""
+    logging.debug(f"Executing function: {function_name} with arguments: {arguments}")
     
-    # Pattern to match ```sh\ncommand\n```
-    pattern = r'```sh\s*\n(.*?)\n```'
-    matches = re.findall(pattern, content, re.DOTALL)
-    
-    if matches:
-        # Return the first command found, stripped of whitespace
-        return matches[0].strip()
-    
-    # Pattern to match just ``` code blocks (fallback)
-    pattern = r'```\s*\n(.*?)\n```'
-    matches = re.findall(pattern, content, re.DOTALL)
-    
-    if matches:
-        # Return the first command found, stripped of whitespace
-        return matches[0].strip()
-    
-    # If no code blocks found, return original content
-    return content.strip()
-
-# Async Function to Interact with the Model
-
-async def generate_command_from_prompt(model: str, prompt: str, stream: bool = False):
-    """
-    Generate a CLI command from a text prompt using the LLM.
-    """
-    logging.debug(f"Generating command from prompt: {prompt}, streaming: {stream}")
-    
-    # Initialize Ollama client
-    client = ollama.AsyncClient()
-    
-    # Define the system prompt for command generation
-    system_prompt = {
-        'role': 'system',
-        'content': (
-            "You are an expert CLI command generator. Your task is to generate a single, "
-            "executable command based on the user's natural language description. "
-            "You may think through the problem first using <think> tags, then provide "
-            "the final command wrapped in ```sh code blocks.\n\n"
-            "Format your response like this:\n"
-            "<think>\nLet me analyze what the user wants...\n</think>\n\n"
-            "```sh\ncommand-here\n```\n\n"
-            "Examples:\n"
-            "User: 'list all files with details'\n"
-            "Assistant: <think>\nUser wants to see all files with detailed information like permissions, size, date.\n"
-            "The ls command with -la flags will show all files including hidden ones with detailed info.\n"
-            "</think>\n\n```sh\nls -la\n```\n\n"
-            "User: 'find all python files'\n"
-            "Assistant: <think>\n"
-            "User wants to locate all Python files. The find command can search for files by name pattern.\n"
-            "Using -name '*.py' will match all files ending in .py\n"
-            "</think>\n\n```sh\nfind . -name '*.py'\n```\n\n"
-            "Focus on common, safe commands. Prefer widely available tools."
+    if function_name == "list_directory":
+        return list_directory(arguments["path"], arguments.get("options", []))
+    elif function_name == "print_working_directory":
+        return print_working_directory()
+    elif function_name == "list_processes":
+        return list_processes(arguments.get("filter"))
+    elif function_name == "display_file_contents":
+        return display_file_contents(
+            arguments["file_path"],
+            arguments.get("start_line"),
+            arguments.get("end_line")
         )
-    }
-    
-    # Create the user message
-    user_message = {
-        'role': 'user',
-        'content': prompt
-    }
-    
-    # Initialize conversation
-    messages = [system_prompt, user_message]
-    
-    try:
-        logging.debug("Sending API call to generate command")
-        
-        if stream:
-            # Streaming mode - output chunks as they arrive
-            collected_content = ""
-            in_think_tag = False
-            think_content = ""
-            final_command = ""
-            
-            async for chunk in await client.chat(
-                model=model,
-                messages=messages,
-                stream=True
-            ):
-                if chunk['message']['content']:
-                    content = chunk['message']['content']
-                    
-                    # Process content and handle think tags
-                    for char in content:
-                        collected_content += char
-                        
-                        # Check for think tag start
-                        if collected_content.endswith('<think>'):
-                            in_think_tag = True
-                            # Output special marker for think tag start
-                            sys.stdout.write('[THINK_START]')
-                            sys.stdout.flush()
-                            continue
-                        
-                        if in_think_tag:
-                            think_content += char
-                            if think_content.endswith('</think>'):
-                                # Output special marker for think tag end
-                                sys.stdout.write('[THINK_END]')
-                                sys.stdout.flush()
-                                in_think_tag = False
-                                think_content = ""
-                                continue
-                            else:
-                                # Output think content
-                                sys.stdout.write(char)
-                                sys.stdout.flush()
-                        else:
-                            # Regular content - stream directly
-                            if not collected_content.endswith('<think>'):
-                                final_command += char
-                                sys.stdout.write(char)
-                                sys.stdout.flush()
-            
-            # Ensure we have a final command
-            if not final_command.strip():
-                # Extract command from collected content
-                final_command = collected_content
-                if '<think>' in final_command and '</think>' in final_command:
-                    # Extract content after </think>
-                    final_command = final_command.split('</think>')[-1].strip()
-            
-            # Extract command from ```sh code blocks if present
-            final_command = extract_command_from_codeblock(final_command)
-            logging.debug(f"Generated command (streaming): {final_command}")
-            
-        else:
-            # Non-streaming mode - original behavior
-            response = await client.chat(
-                model=model,
-                messages=messages,
-            )
-            
-            generated_command = response['message']['content'].strip()
-            logging.debug(f"Generated command: {generated_command}")
-            
-            # Clean up the command - remove any extra formatting or thinking tags
-            if '<think>' in generated_command:
-                # Extract content between </think> and end, or use the last line
-                if '</think>' in generated_command:
-                    generated_command = generated_command.split('</think>')[-1].strip()
-                else:
-                    lines = generated_command.split('\n')
-                    for line in reversed(lines):
-                        line = line.strip()
-                        if line and not line.startswith('<') and not line.endswith('>'):
-                            generated_command = line
-                            break
-            
-            # Extract command from ```sh code blocks if present
-            generated_command = extract_command_from_codeblock(generated_command)
-            
-            # Print the cleaned command to stdout (will be redirected to result file)
-            print(generated_command)
-        
-    except Exception as e:
-        logging.exception("Error generating command")
-        # Print error message to stdout
-        print(f"Error generating command: {str(e)}")
+    else:
+        return f"Unknown function: {function_name}"
 
 async def run(model: str, error_details: Dict[str, Any]):
-    logging.debug("Starting interaction with the Ollama model")
-    client = ollama.AsyncClient()
-
-    # Define the system prompt for shell debugging
-    capture_method = error_details.get('capture_method', 'traditional')
-    system_prompt = {
-        'role': 'system',
-        'content': (
-            "You are a shell debugger. Analyze the following failed shell command and provide a corrected command. "
-            "Respond with the corrected shell command wrapped in ```sh code blocks, or by using a tool provided. "
-            "You may not ask clarifying questions. You are expected to use the provided tools to answer the question. "
-            f"The command output was captured using: {capture_method} method."
-        )
-    }
-
-    # Define six multi-turn few-shot examples
-    few_shot_examples = [
-        # Example 1
-        {
-            'role': 'user',
-            'content': (
-                "```sh\ncd /nonexistent_dir\n```\n"
-                "Error Output:\n```\nbash: cd: /nonexistent_dir: No such file or directory\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'list_directory',
-                        'arguments': {
-                            'path': '/',
-                            'options': ['-la']
-                        }
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "drwxr-xr-x  5 root root  4096 Apr 10 10:00 existing_dir\n..."
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\ncd /existing_dir\n```"
-        },
-
-        # Example 2
-        {
-            'role': 'user',
-            'content': (
-                "```sh\ngrep 'pattern'\n```\n"
-                "Error Output:\n```\ngrep: missing file operand\nTry 'grep --help' for more information.\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'list_directory',
-                        'arguments': {
-                            'path': '.',
-                            'options': ['-la']
-                        }
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "file1.txt\nfile2.log\nscript.sh\n"
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\ngrep 'pattern' file1.txt\n```"
-        },
-
-        # Example 3
-        {
-            'role': 'user',
-            'content': (
-                "```sh\ncat /etc/hostsh\n```\n"
-                "Error Output:\n```\nbash: cat: /etc/hostsh: No such file or directory\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'list_directory',
-                        'arguments': {
-                            'path': '/etc',
-                            'options': []
-                        }
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "hosts\nhostname\nresolv.conf\n"
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\ncat /etc/hosts\n```"
-        },
-
-        # Example 4
-        {
-            'role': 'user',
-            'content': (
-                "```sh\npython script.py\n```\n"
-                "Error Output:\n```\npython: command not found\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'list_processes',
-                        'arguments': {
-                            'options': ['aux']
-                        }
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND\n..."
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\npython3 script.py\n```"
-        },
-
-        # Example 5
-        {
-            'role': 'user',
-            'content': (
-                "```sh\nmkdir new_folder\n```\n"
-                "Error Output:\n```\nmkdir: cannot create directory 'new_folder': Permission denied\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'print_working_directory',
-                        'arguments': {}
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "/home/user/projects"
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\nsudo mkdir new_folder\n```"
-        },
-
-        # Example 6
-        {
-            'role': 'user',
-            'content': (
-                "```sh\nrm *.txt\n```\n"
-                "Error Output:\n```\nrm: missing operand after '*.txt'\nTry 'rm --help' for more information.\n```"
-            )
-        },
-        {
-            'role': 'assistant',
-            'content': "",
-            'tool_calls': [
-                {
-                    'function': {
-                        'name': 'list_directory',
-                        'arguments': {
-                            'path': '.',
-                            'options': ['-la']
-                        }
-                    }
-                }
-            ]
-        },
-        {
-            'role': 'tool',
-            'content': "file1.txt\nfile2.txt\nREADME.md\n"
-        },
-        {
-            'role': 'assistant',
-            'content': "```sh\nrm *.txt\n```"
-        },
-    ]
-
-    # Construct the user message as per the interaction pattern
-    stderr_content = error_details.get('stderr', '')
-    if isinstance(stderr_content, list):
-        stderr_content = '\n'.join(stderr_content)
+    """Run the debugging assistant using OpenAI-compatible API"""
+    logging.debug("=== Starting debugging assistant ===")
     
-    user_message = {
-        'role': 'user',
-        'content': (
-            f"```sh\n{error_details['command']}\n```\n"
-            f"Error Output:\n```\n{stderr_content}\n```"
-        )
-    }
+    # System prompt
+    system_prompt = f"""You are an expert command-line debugger assistant specialized in diagnosing and fixing shell command errors.
 
-    # Initialize conversation with system prompt and few-shot examples
-    messages = [system_prompt] + few_shot_examples + [user_message]
+CRITICAL INSTRUCTION: You must analyze the error and provide ONLY the corrected command that will work. No explanations, no alternatives, just the single working command.
 
-    logging.debug("Conversation initialized with system prompt, few-shot examples, and user message")
+You have access to these tools to help diagnose issues:
+- list_directory: List directory contents
+- print_working_directory: Get current directory
+- list_processes: List running processes
+- display_file_contents: Read file contents
 
-    # First API call: Send the messages and function descriptions to the model
+Current system information:
+- Platform: {platform.system()} {platform.release()}
+- Python: {sys.version.split()[0]}
+- Shell: {os.environ.get('SHELL', 'unknown')}
+
+Error context provided by user:
+{json.dumps(error_details, indent=2)}
+
+Remember: Output ONLY the corrected command, nothing else."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Fix this command: {error_details['command']}"}
+    ]
+    
+    # Allow up to 5 iterations for tool use
+    for i in range(5):
+        try:
+            # Create chat completion with tools
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.1,
+                stream=True
+            )
+            
+            # Process streaming response
+            full_content = ""
+            tool_calls = []
+            current_tool_call = None
+            
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    # Print each character as it arrives for streaming effect
+                    print(content, end='', flush=True)
+                
+                # Handle tool calls
+                if chunk.choices[0].delta.tool_calls:
+                    for tool_call_chunk in chunk.choices[0].delta.tool_calls:
+                        if tool_call_chunk.id:
+                            # New tool call
+                            if current_tool_call:
+                                tool_calls.append(current_tool_call)
+                            current_tool_call = {
+                                "id": tool_call_chunk.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call_chunk.function.name if tool_call_chunk.function.name else "",
+                                    "arguments": tool_call_chunk.function.arguments if tool_call_chunk.function.arguments else ""
+                                }
+                            }
+                        else:
+                            # Continuing current tool call
+                            if current_tool_call and tool_call_chunk.function:
+                                if tool_call_chunk.function.name:
+                                    current_tool_call["function"]["name"] += tool_call_chunk.function.name
+                                if tool_call_chunk.function.arguments:
+                                    current_tool_call["function"]["arguments"] += tool_call_chunk.function.arguments
+            
+            # Add final tool call if exists
+            if current_tool_call:
+                tool_calls.append(current_tool_call)
+            
+            # Add assistant's response to messages
+            assistant_message = {"role": "assistant", "content": full_content}
+            if tool_calls:
+                assistant_message["tool_calls"] = tool_calls
+            messages.append(assistant_message)
+            
+            # If there are tool calls, execute them
+            if tool_calls:
+                logging.debug(f"Executing {len(tool_calls)} tool calls")
+                for tool_call in tool_calls:
+                    function_name = tool_call["function"]["name"]
+                    try:
+                        arguments = json.loads(tool_call["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    
+                    # Execute the function
+                    result = execute_function(function_name, arguments)
+                    
+                    # Add tool response to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": result
+                    })
+                
+                # Continue the loop to get the next response
+                continue
+            else:
+                # No tool calls, we're done
+                if full_content:
+                    print()  # Add newline after streaming
+                break
+                
+        except Exception as e:
+            logging.exception("Error in API call")
+            print(f"cd {error_details.get('pwd', '.')}", flush=True)
+            break
+
+def extract_command_from_markdown(text: str) -> str:
+    """Extract command from markdown code blocks, removing think tags"""
+    import re
+    logging.debug("Extracting command from markdown", text)
+    # First, remove <think> tags and their content
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    
+    # Look for code blocks with bash/sh/zsh/shell language identifiers
+    code_block_pattern = r'```(?:bash|sh|zsh|shell)\s*\n(.*?)\n```'
+    matches = re.findall(code_block_pattern, text, re.DOTALL)
+    
+    if matches:
+        # Return the first code block found
+        return matches[0].strip()
+    
+    # If no code blocks found, look for any code blocks
+    generic_pattern = r'```\s*\n(.*?)\n```'
+    matches = re.findall(generic_pattern, text, re.DOTALL)
+    
+    if matches:
+        return matches[0].strip()
+    
+    # If still no code blocks, return the original text stripped
+    return text.strip()
+
+async def generate_command_from_prompt(model: str, prompt: str, stream_mode: bool = False):
+    """Generate a command from a natural language prompt"""
+    logging.debug(f"=== Starting command generation (stream_mode={stream_mode}) ===")
+    logging.debug(f"Prompt: {prompt}")
+    
+    # System prompt for command generation
+    system_prompt = """You are a helpful command-line assistant that generates shell commands from natural language descriptions.
+
+Your response should follow this exact format:
+1. Start with your reasoning wrapped in <think> tags
+2. Then provide the command in a markdown code block
+
+Example response format:
+<think>
+[Your step-by-step reasoning here]
+</think>
+
+```bash
+[Your command here]
+```
+
+Current system information:
+- Platform: """ + platform.system() + " " + platform.release() + """
+- Shell: """ + os.environ.get('SHELL', 'unknown') + """
+- Current directory: """ + os.getcwd() + """
+
+IMPORTANT: You MUST include the <think> section before the command. Think about:
+- What the user is trying to accomplish
+- Which commands and options to use
+- Any potential issues or considerations"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt}
+    ]
+    
     try:
-        logging.debug("Sending first API call to the model with messages and tools")
-        response = await client.chat(
+        response = client.chat.completions.create(
             model=model,
             messages=messages,
-            tools=list(ALLOWED_FUNCTIONS.values()),
+            temperature=0.3,
+            stream=True,
         )
-        logging.debug("Received response from the model")
+        
+        full_response = ""
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                full_response += content
+                if stream_mode:
+                    # In stream mode, print each character as it arrives
+                    # The Zsh plugin will handle parsing and display
+                    print(content, end='', flush=True)
+        
+        if stream_mode:
+            # Ensure we end with a newline
+            if not full_response.endswith('\n'):
+                print(flush=True)
+        else:
+            # Non-stream mode: extract and print just the command
+            command = extract_command_from_markdown(full_response)
+            print(command, flush=True)
+            
     except Exception as e:
-        logging.exception("Error during the first API call to the model")
-        print(f"Error communicating with the model: {str(e)}", file=sys.stderr)
-        return
+        logging.exception("Error generating command")
+        print("echo 'Error generating command'", flush=True)
 
-    # Add the model's response to the conversation history
-    messages.append(response['message'])
-
-    # Check if the model decided to use any provided function
-    if not response['message'].get('tool_calls'):
-        logging.debug("The model didn't use any function")
-        # Extract command from ```sh code blocks if present
-        command_response = extract_command_from_codeblock(response['message']['content'])
-        print(command_response)
-        return
-
-    # Process function calls made by the model
-    if response['message'].get('tool_calls'):
-        for tool in response['message']['tool_calls']:
-            function_name = tool['function']['name']
-            function_args = tool['function']['arguments']
-            logging.debug(f"Processing tool call: {function_name} with arguments: {function_args}")
-
-            if function_name in AVAILABLE_FUNCTIONS:
-                function_to_call = AVAILABLE_FUNCTIONS[function_name]
-                try:
-                    if function_name == "list_directory":
-                        path = function_args['path']
-                        options = function_args.get('options', [])
-                        logging.debug(f"Calling list_directory with path: {path}, options: {options}")
-                        function_response = function_to_call(path, options)
-                    elif function_name == "print_working_directory":
-                        logging.debug("Calling print_working_directory")
-                        function_response = function_to_call()
-                    elif function_name == "list_processes":
-                        options = function_args.get('options', [])
-                        logging.debug(f"Calling list_processes with options: {options}")
-                        function_response = function_to_call(options)
-                    elif function_name == "display_file_contents":
-                        file_path = function_args['file_path']
-                        logging.debug(f"Calling display_file_contents with file_path: {file_path}")
-                        function_response = function_to_call(file_path)
-                    else:
-                        logging.warning(f"Function '{function_name}' is not implemented")
-                        function_response = f"Function '{function_name}' is not implemented."
-                except Exception as e:
-                    logging.exception(f"Error executing function '{function_name}'")
-                    function_response = f"Error executing function '{function_name}': {str(e)}"
-
-                # Add function response to the conversation
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'content': function_response,
-                    }
-                )
-                logging.debug(f"Function '{function_name}' executed successfully")
-            else:
-                logging.warning(f"Function '{function_name}' is not allowed")
-                function_response = f"Function '{function_name}' is not allowed."
-                messages.append(
-                    {
-                        'role': 'tool',
-                        'content': function_response,
-                    }
-                )
-
-    # Second API call: Get final response from the model
+def gather_error_details_from_files(command: str, output_file: str, timing_file: str, capture_method: str) -> Dict[str, Any]:
+    """Gather error details from the provided files"""
+    logging.debug(f"Gathering error details from files: command={command}, output_file={output_file}, timing_file={timing_file}, capture_method={capture_method}")
+    
+    error_details = {
+        "command": command,
+        "pwd": os.getcwd(),
+        "timestamp": datetime.now().isoformat(),
+        "env": dict(os.environ),
+        "system_info": {
+            "platform": platform.system(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+        },
+        "capture_method": capture_method
+    }
+    
+    # Read the output file
     try:
-        logging.debug("Sending second API call to the model with updated messages")
-        final_response = await client.chat(model=model, messages=messages)
-        logging.debug("Received final response from the model")
-        # Extract command from ```sh code blocks if present
-        final_command_response = extract_command_from_codeblock(final_response['message']['content'])
-        print(final_command_response)
+        with open(output_file, 'r') as f:
+            output_content = f.read()
+            # Try to parse as JSON first (for script capture method)
+            if capture_method == "script":
+                try:
+                    output_data = json.loads(output_content)
+                    error_details["output"] = output_data.get("output", "")
+                    error_details["exit_code"] = output_data.get("exit_code", 1)
+                    error_details["error"] = output_data.get("error", "")
+                except json.JSONDecodeError:
+                    # Fallback to raw content
+                    error_details["output"] = output_content
+                    error_details["exit_code"] = 1
+            else:
+                error_details["output"] = output_content
+                error_details["exit_code"] = 1
     except Exception as e:
-        logging.exception("Error during the second API call to the model")
-        print(f"Error communicating with the model: {str(e)}", file=sys.stderr)
+        logging.error(f"Error reading output file: {e}")
+        error_details["output"] = f"Error reading output file: {str(e)}"
+        error_details["exit_code"] = 1
+    
+    # Read timing file if provided
+    if timing_file and timing_file != "None":
+        try:
+            with open(timing_file, 'r') as f:
+                error_details["timing"] = f.read()
+        except Exception as e:
+            logging.error(f"Error reading timing file: {e}")
+    
+    # Add PATH information
+    error_details["path"] = os.environ.get("PATH", "").split(os.pathsep)
+    
+    # Check if common commands exist
+    common_commands = ["git", "npm", "python", "python3", "node", "docker", "kubectl"]
+    error_details["available_commands"] = {}
+    for cmd in common_commands:
+        error_details["available_commands"][cmd] = shutil.which(cmd) is not None
+    
+    return error_details
 
-# Main Execution Flow
-
-def main():
-    logging.debug("Starting main execution flow")
-
-    # Handle different argument patterns
+# Main async function
+if __name__ == "__main__":
+    logging.debug("=== Script started ===")
+    logging.debug(f"Arguments: {sys.argv}")
+    
     if len(sys.argv) == 2:
-        # Original usage: python script.py <json_file>
+        # Single argument mode - JSON file with error details
         error_details_file = sys.argv[1]
-        if not os.path.exists(error_details_file):
-            logging.error(f"Error details file not found: {error_details_file}")
-            print(f"Error details file not found: {error_details_file}", file=sys.stderr)
-            sys.exit(1)
-
+        logging.debug(f"Reading error details from file: {error_details_file}")
         try:
             with open(error_details_file, 'r') as f:
-                error_details = json.loads(f.read())
-            logging.debug(f"Loaded error details: {error_details}")
+                content = f.read()
+                logging.debug(f"File content: {content[:200]}...")  # Log first 200 chars
+                error_details = json.loads(content)
+                logging.debug(f"Parsed error details: {error_details}")
         except json.JSONDecodeError as e:
-            logging.exception(f"JSON decoding failed for file: {error_details_file}")
+            logging.error(f"JSON decoding failed: {str(e)}")
+            logging.error(f"File content that failed to parse: {content}")
             print(f"JSON decoding failed: {str(e)}", file=sys.stderr)
             sys.exit(1)
         except Exception as e:
@@ -787,7 +523,7 @@ def main():
             sys.exit(1)
 
         # Run the async function to interact with the model for debugging
-        asyncio.run(run('qwen2.5:1.5b', error_details))
+        asyncio.run(run(MODEL, error_details))
 
     elif len(sys.argv) >= 5:
         # Check if first argument is GENERATE_MODE
@@ -798,7 +534,7 @@ def main():
             
             if not os.path.exists(prompt_file):
                 logging.error(f"Prompt file not found: {prompt_file}")
-                print(f"Prompt file not found: {prompt_file}", file=sys.stderr)
+                print(f"Error: Prompt file not found: {prompt_file}", file=sys.stderr)
                 sys.exit(1)
             
             try:
@@ -807,7 +543,7 @@ def main():
                 logging.debug(f"Loaded prompt: {prompt}")
                 
                 # Run the async function to generate command
-                asyncio.run(generate_command_from_prompt('qwen2.5:1.5b', prompt, stream_mode))
+                asyncio.run(generate_command_from_prompt(MODEL, prompt, stream_mode))
                 
             except Exception as e:
                 logging.exception(f"Error reading prompt file: {prompt_file}")
@@ -824,7 +560,7 @@ def main():
             logging.debug(f"Generated error details: {error_details}")
             
             # Run the async function to interact with the model for debugging
-            asyncio.run(run('qwen2.5:1.5b', error_details))
+            asyncio.run(run(MODEL, error_details))
 
     else:
         logging.error("Invalid arguments")
@@ -832,7 +568,3 @@ def main():
         print("   or: python ollama_debugger.py <command> <output_file> <timing_file> <capture_method>")
         print("   or: python ollama_debugger.py GENERATE_MODE <prompt_file> <ignored> <ignored> [stream]")
         sys.exit(1)
-
-# Run the main function
-if __name__ == "__main__":
-    main()

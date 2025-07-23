@@ -12,7 +12,7 @@ An intelligent Zsh plugin that uses AI to debug failed commands and generate she
 - **💭 Inline Suggestions**: Accept or reject fixes with simple keyboard shortcuts
 - **🔍 Context-Aware**: AI can inspect files, directories, and processes to provide accurate solutions
 - **🚀 Fast Local Inference**: Uses lightweight Ollama models for quick responses
-- **🌐 OpenAI Support**: Optional GPT-4o integration for more complex debugging
+- **🌐 Universal LLM Support**: Works with any OpenAI-compatible API (OpenAI, Anthropic, Ollama, etc.)
 - **📦 Isolated Environment**: Uses a Python virtual environment to avoid conflicts
 
 ## Installation
@@ -63,12 +63,32 @@ cd zsh-llm-debugger
    source ~/.zshrc
    ```
 
-### OpenAI Setup (Optional)
+### LLM Provider Setup
 
-To use GPT-4o instead of local models:
+The debugger now supports any OpenAI-compatible API. Configure your preferred provider:
 
+#### Local Ollama (Default)
+No additional configuration needed. Just ensure Ollama is running.
+
+#### OpenAI
 ```bash
-export OPENAI_API_KEY="your-api-key-here"
+export LLM_DEBUGGER_BASE_URL="https://api.openai.com/v1"
+export LLM_DEBUGGER_API_KEY="sk-your-api-key"
+export LLM_DEBUGGER_MODEL="gpt-4o-mini"
+```
+
+#### Anthropic (via OpenAI-compatible endpoint)
+```bash
+export LLM_DEBUGGER_BASE_URL="https://api.anthropic.com/v1"
+export LLM_DEBUGGER_API_KEY="your-anthropic-api-key"
+export LLM_DEBUGGER_MODEL="claude-3-haiku-20240307"
+```
+
+#### Custom OpenAI-compatible endpoint
+```bash
+export LLM_DEBUGGER_BASE_URL="https://your-endpoint.com/v1"
+export LLM_DEBUGGER_API_KEY="your-api-key"
+export LLM_DEBUGGER_MODEL="your-model-name"
 ```
 
 ## Usage
@@ -121,11 +141,21 @@ debug_command_openai "npm install"
 # Enable debug logging
 export LLM_DEBUGGER_DEBUG=1
 
-# Set OpenAI API key (optional)
-export OPENAI_API_KEY="sk-..."
+# Configure the LLM endpoint (defaults to Ollama's OpenAI-compatible endpoint)
+export LLM_DEBUGGER_BASE_URL="http://localhost:11434/v1"  # Default: Ollama
+# export LLM_DEBUGGER_BASE_URL="https://api.openai.com/v1"  # For OpenAI
+# export LLM_DEBUGGER_BASE_URL="https://api.anthropic.com/v1"  # For Anthropic
 
-# Change the Ollama model (default: qwen2.5:1.5b)
-export OLLAMA_MODEL="llama3.2:3b"
+# Set the API key (required for cloud providers)
+export LLM_DEBUGGER_API_KEY="your-api-key"  # Default: "ollama"
+
+# Change the model (default: qwen2.5:1.5b)
+export LLM_DEBUGGER_MODEL="qwen2.5:1.5b"  # For Ollama
+# export LLM_DEBUGGER_MODEL="gpt-4o-mini"  # For OpenAI
+# export LLM_DEBUGGER_MODEL="claude-3-haiku"  # For Anthropic
+
+# Set OpenAI API key (for openai_debugger.py)
+export OPENAI_API_KEY="sk-..."
 ```
 
 ### Log Files

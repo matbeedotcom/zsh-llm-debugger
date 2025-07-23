@@ -17,11 +17,25 @@ setopt NO_CHECK_JOBS
 setopt NO_BG_NICE
 
 # Debug function - optimized to avoid subprocess creation
+# Guard against recursion with a flag
+typeset -g LLM_DEBUGGER_IN_DEBUG=0
+
 llm_debugger_debug() {
+    # Guard against recursive calls
+    if [[ $LLM_DEBUGGER_IN_DEBUG -eq 1 ]]; then
+        return
+    fi
+    
     if [[ $LLM_DEBUGGER_DEBUG -eq 1 ]]; then
+        # Set flag to prevent recursion
+        LLM_DEBUGGER_IN_DEBUG=1
+        
         # Use a simple timestamp or no timestamp to avoid subprocess creation
         # This prevents the "job table full" error from $(date) calls
         print -r -- "[DEBUG] $1" >>"$LLM_DEBUGGER_LOG_FILE"
+        
+        # Clear recursion guard
+        LLM_DEBUGGER_IN_DEBUG=0
     fi
 }
 
@@ -353,7 +367,10 @@ llm_debugger_execute_and_analyze() {
 
         llm_debugger_debug "Python debugger exit code: $exit_code"
         if [[ -f "$debug_output_file" ]]; then
-            llm_debugger_debug "Debug output file exists, size: $(wc -c <"$debug_output_file" 2>/dev/null || echo 0)"
+            # Avoid command substitution in debug calls to prevent recursion
+            local file_size
+            file_size=$(wc -c <"$debug_output_file" 2>/dev/null || echo 0)
+            llm_debugger_debug "Debug output file exists, size: $file_size"
         else
             llm_debugger_debug "Debug output file does not exist"
         fi
@@ -393,9 +410,19 @@ llm_debugger_execute_and_analyze() {
             fi
         else
             printf "\033[91mError: Failed to analyze command (exit code: $exit_code)\033[0m\n"
-            llm_debugger_debug "Debug failed - exit code: $exit_code, file exists: $([[ -f "$debug_output_file" ]] && echo "yes" || echo "no"), file size: $(wc -c <"$debug_output_file" 2>/dev/null || echo 0)"
+            # Avoid command substitutions in debug calls to prevent recursion
+            local file_exists="no"
+            local file_size="0"
             if [[ -f "$debug_output_file" ]]; then
-                llm_debugger_debug "Debug output file contents: $(cat "$debug_output_file" 2>/dev/null)"
+                file_exists="yes"
+                file_size=$(wc -c <"$debug_output_file" 2>/dev/null || echo 0)
+            fi
+            llm_debugger_debug "Debug failed - exit code: $exit_code, file exists: $file_exists, file size: $file_size"
+            if [[ -f "$debug_output_file" ]]; then
+                # Avoid command substitution in debug calls to prevent recursion
+                local debug_contents
+                debug_contents=$(cat "$debug_output_file" 2>/dev/null)
+                llm_debugger_debug "Debug output file contents: $debug_contents"
             fi
         fi
 
@@ -771,7 +798,10 @@ llm_debugger_execute_and_analyze_sync() {
             printf "\033[91mError: Failed to analyze command (exit code: $exit_code)\033[0m\n"
             llm_debugger_debug "Command analysis failed - exit code: $exit_code"
             if [[ -f "$debug_output_file" ]]; then
-                llm_debugger_debug "Debug output file contents: $(cat "$debug_output_file" 2>/dev/null)"
+                # Avoid command substitution in debug calls to prevent recursion
+                local debug_contents
+                debug_contents=$(cat "$debug_output_file" 2>/dev/null)
+                llm_debugger_debug "Debug output file contents: $debug_contents"
             fi
         fi
     else
@@ -851,7 +881,10 @@ llm_debugger_generate_command_interactive_sync() {
         printf "\033[91mError: Failed to generate command (exit code: $exit_code)\033[0m\n"
         llm_debugger_debug "Command generation failed - exit code: $exit_code"
         if [[ -f "$result_file" ]]; then
-            llm_debugger_debug "Result file contents: $(cat "$result_file" 2>/dev/null)"
+            # Avoid command substitution in debug calls to prevent recursion
+            local result_contents
+            result_contents=$(cat "$result_file" 2>/dev/null)
+            llm_debugger_debug "Result file contents: $result_contents"
         fi
     fi
 
@@ -986,6 +1019,18 @@ llm_debugger_generate_command() {
     local current_content=""
     local display_buffer=""
     local in_think=0
+    local think_content=""
+    local think_displayed=0
+    local final_command=""
+    local found_think_tag=0
+
+    # Terminal width for formatting
+    local term_width=$(tput cols)
+    local box_width=$((term_width > 80 ? 80 : term_width - 4))
+    
+    # Show initial thinking animation
+    printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
 
     while kill -0 "$python_pid" 2>/dev/null; do
         if [[ -f "$stream_file" ]]; then
@@ -995,37 +1040,87 @@ llm_debugger_generate_command() {
                 local new_content=$(tail -c +$((last_size + 1)) "$stream_file" 2>/dev/null)
                 current_content+="$new_content"
 
-                # Process the content for display
-                if [[ "$current_content" == *"<think[THINK_START]"* ]]; then
+                # Check for <think> tag
+                if [[ "$current_content" == *"<think>"* && $in_think -eq 0 ]]; then
                     in_think=1
-                    printf "\r\033[2K\033[90m💭 Thinking..."
-                elif [[ "$current_content" == *"[THINK_END]"* ]]; then
-                    in_think=0
-                    printf "\r\033[2K\033[32m▶\033[0m "
-                    # Extract command after think tags
-                    display_buffer="${current_content##*\[THINK_END\]}"
-                    display_buffer="${display_buffer## }"
-                    display_buffer="${display_buffer%%$'\n'*}"
-                    display_buffer="${display_buffer%\%*}"
-                    printf "%s" "$display_buffer"
-                elif [[ $in_think -eq 0 ]]; then
-                    # Not in think mode, show command being built
-                    display_buffer="$current_content"
-                    # Clean up display buffer
-                    display_buffer="${display_buffer//<think\[THINK_START\]*/}"
-                    display_buffer="${display_buffer//\[THINK_END\]*/}"
-                    display_buffer="${display_buffer## }"
-                    display_buffer="${display_buffer%%$'\n'*}"
-                    display_buffer="${display_buffer%\%*}"
-                    if [[ -n "$display_buffer" ]]; then
-                        printf "\r\033[2K\033[32m▶\033[0m %s" "$display_buffer"
+                    found_think_tag=1
+                    think_content=""
+                    # We already showed the thinking header, just continue
+                fi
+
+                # Process thinking content
+                if [[ $in_think -eq 1 ]]; then
+                    # Extract content between current position and </think> or end
+                    local temp_content="$current_content"
+                    temp_content="${temp_content#*<think>}"
+                    
+                    if [[ "$temp_content" == *"</think>"* ]]; then
+                        # Found closing tag
+                        think_content="${temp_content%%</think>*}"
+                        in_think=0
+                        
+                        # Display the thinking content line by line
+                        while IFS= read -r line; do
+                            # Word wrap long lines
+                            while [[ ${#line} -gt $((box_width - 4)) ]]; do
+                                local wrap_point=$((box_width - 4))
+                                # Find last space before wrap point
+                                local i=$wrap_point
+                                while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
+                                    ((i--))
+                                done
+                                if [[ $i -eq 0 ]]; then
+                                    i=$wrap_point
+                                fi
+                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
+                                line="${line:$((i + 1))}"
+                            done
+                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                        done <<< "$think_content"
+                        
+                        # Close the thinking box
+                        printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                        think_displayed=1
+                        
+                        # Show command prompt
+                        printf "\033[32m▶\033[0m Generating command..."
+                    else
+                        # Still collecting thinking content
+                        think_content="$temp_content"
+                    fi
+                elif [[ $think_displayed -eq 1 ]] || [[ "$current_content" == *'```'* && $found_think_tag -eq 0 ]]; then
+                    # After thinking OR if no think tags but we see code blocks
+                    if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
+                        # No think tags found, but we have a code block - show generic thinking done
+                        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
+                        printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                        think_displayed=1
+                        printf "\033[32m▶\033[0m Generating command..."
+                    fi
+                    
+                    local content_to_parse="$current_content"
+                    if [[ $found_think_tag -eq 1 ]]; then
+                        content_to_parse="${current_content#*</think>}"
+                    fi
+                    
+                    # Extract command from markdown
+                    if [[ "$content_to_parse" == *'```'* ]]; then
+                        local in_code_block="${content_to_parse#*\`\`\`}"
+                        # Skip language identifier
+                        in_code_block="${in_code_block#*$'\n'}"
+                        if [[ "$in_code_block" == *'```'* ]]; then
+                            final_command="${in_code_block%%\`\`\`*}"
+                            final_command="${final_command%$'\n'}"
+                            # Update display with final command
+                            printf "\r\033[2K\033[32m▶\033[0m %s" "$final_command"
+                        fi
                     fi
                 fi
 
                 last_size=$current_size
             fi
         fi
-        sleep 0.1
+        sleep 0.05
     done
 
     # Wait for completion and read final result
@@ -1033,15 +1128,27 @@ llm_debugger_generate_command() {
 
     # Copy stream file to result file for final processing
     if [[ -f "$stream_file" ]]; then
-        # Clean the content and save to result file
-        local final_content=$(cat "$stream_file")
-        final_content="${final_content//<think\[THINK_START\]*/}"
-        final_content="${final_content//\[THINK_END\]*/}"
-        final_content="${final_content## }"
-        final_content="${final_content%% }"
-        final_content="${final_content%%$'\n'*}"
-        final_content="${final_content%\%*}"
-        echo "$final_content" >"$result_file"
+        # Extract command from the streamed content
+        if [[ -z "$final_command" ]]; then
+            # If we didn't extract the command during streaming, do it now
+            local full_content=$(cat "$stream_file")
+            # Remove think tags and content
+            full_content="${full_content#*</think>}"
+            # Extract from markdown code block
+            if [[ "$full_content" == *'```'* ]]; then
+                local in_code_block="${full_content#*\`\`\`}"
+                in_code_block="${in_code_block#*$'\n'}"
+                if [[ "$in_code_block" == *'```'* ]]; then
+                    final_command="${in_code_block%%\`\`\`*}"
+                    final_command="${final_command%$'\n'}"
+                fi
+            fi
+        fi
+        
+        # Clean and save the final command
+        final_command="${final_command## }"
+        final_command="${final_command%% }"
+        echo "$final_command" >"$result_file"
         rm -f "$stream_file"
     fi
 
