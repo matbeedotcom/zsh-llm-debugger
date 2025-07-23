@@ -354,80 +354,186 @@ llm_debugger_execute_and_analyze() {
 
         # Create output file for debug mode
         local debug_output_file="/tmp/llm_debugger_$$_debug_output"
-        rm -f "$debug_output_file"
+        local stream_file="/tmp/llm_debugger_$$_stream"
+        rm -f "$debug_output_file" "$stream_file"
 
         llm_debugger_debug "Started Python debugger for command: $command"
 
-        # Show thinking indicator
-        printf "\n\033[90m💭 Analyzing error...\033[0m"
+        # Terminal width for formatting
+        local term_width=$(tput cols)
+        local box_width=$((term_width > 80 ? 80 : term_width - 4))
+        
+        # Show thinking box
+        printf "\n\033[36m╭─ 💭 Analyzing Error ───────────────────────╮\033[0m\n"
+        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Examining the error output..."
 
-        # Use proper debug mode with tools and few-shot examples
-        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
+        # Use proper debug mode with tools and few-shot examples - capture streaming output
+        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$stream_file" 2>&1 &
+        local python_pid=$!
+        
+        # Monitor the streaming output
+        local last_size=0
+        local current_content=""
+        local in_think=0
+        local think_content=""
+        local think_displayed=0
+        local suggested_command=""
+        local found_think_tag=0
+        
+        while kill -0 "$python_pid" 2>/dev/null; do
+            if [[ -f "$stream_file" ]]; then
+                local current_size=$(wc -c <"$stream_file" 2>/dev/null || echo "0")
+                if [[ $current_size -gt $last_size ]]; then
+                    # Read new content
+                    local new_content=$(tail -c +$((last_size + 1)) "$stream_file" 2>/dev/null)
+                    current_content+="$new_content"
+                    
+                    # Check for <think> tag
+                    if [[ "$current_content" == *"<think>"* && $in_think -eq 0 ]]; then
+                        in_think=1
+                        found_think_tag=1
+                        think_content=""
+                    fi
+                    
+                    # Process thinking content
+                    if [[ $in_think -eq 1 ]]; then
+                        # Extract content between current position and </think> or end
+                        local temp_content="$current_content"
+                        temp_content="${temp_content#*<think>}"
+                        
+                        if [[ "$temp_content" == *"</think>"* ]]; then
+                            # Found closing tag
+                            think_content="${temp_content%%</think>*}"
+                            in_think=0
+                            
+                            # Display the thinking content line by line
+                            while IFS= read -r line; do
+                                # Skip empty lines at the beginning
+                                [[ -z "$line" && $think_displayed -eq 0 ]] && continue
+                                think_displayed=1
+                                
+                                # Word wrap long lines
+                                while [[ ${#line} -gt $((box_width - 4)) ]]; do
+                                    local wrap_point=$((box_width - 4))
+                                    # Find last space before wrap point
+                                    local i=$wrap_point
+                                    while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
+                                        ((i--))
+                                    done
+                                    if [[ $i -eq 0 ]]; then
+                                        i=$wrap_point
+                                    fi
+                                    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
+                                    line="${line:$((i + 1))}"
+                                done
+                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                            done <<< "$think_content"
+                            
+                            # Close the thinking box
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            
+                            # Show command prompt
+                            printf "\033[32m▶\033[0m Suggested fix: "
+                        else
+                            # Still collecting thinking content
+                            think_content="$temp_content"
+                        fi
+                    elif [[ $think_displayed -eq 1 ]] || [[ $found_think_tag -eq 0 && $current_size -gt 100 ]]; then
+                        # After thinking OR if no think tags but we have content
+                        if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
+                            # No think tags found - show generic message and close box
+                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Identifying the issue..."
+                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best fix..."
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            think_displayed=1
+                            printf "\033[32m▶\033[0m Suggested fix: "
+                        fi
+                        
+                        # Extract command after think tags
+                        local content_to_parse="$current_content"
+                        if [[ $found_think_tag -eq 1 ]]; then
+                            content_to_parse="${current_content#*</think>}"
+                        fi
+                        
+                        # Extract command from various formats
+                        # Look for backtick-wrapped commands
+                        if [[ "$content_to_parse" == *'`'*'`'* ]]; then
+                            suggested_command="${content_to_parse#*\`}"
+                            suggested_command="${suggested_command%%\`*}"
+                            suggested_command="${suggested_command%$'\n'}"
+                            suggested_command="${suggested_command#$'\n'}"
+                            # Update display
+                            printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
+                        else
+                            # Fallback: take first non-empty line after think
+                            suggested_command=$(echo "$content_to_parse" | grep -v '^[[:space:]]*$' | head -1)
+                            if [[ -n "$suggested_command" ]]; then
+                                printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
+                            fi
+                        fi
+                    fi
+                    
+                    last_size=$current_size
+                fi
+            fi
+            sleep 0.05
+        done
+        
+        # Wait for completion
+        wait $python_pid
         local exit_code=$?
 
         llm_debugger_debug "Python debugger exit code: $exit_code"
-        if [[ -f "$debug_output_file" ]]; then
-            # Avoid command substitution in debug calls to prevent recursion
-            local file_size
-            file_size=$(wc -c <"$debug_output_file" 2>/dev/null || echo 0)
-            llm_debugger_debug "Debug output file exists, size: $file_size"
-        else
-            llm_debugger_debug "Debug output file does not exist"
-        fi
 
-        # Clear the thinking line
+        # If we didn't extract a command during streaming, try from the final output
+        if [[ -z "$suggested_command" && -f "$stream_file" ]]; then
+            local full_content=$(cat "$stream_file")
+            # Remove think tags
+            full_content="${full_content#*</think>}"
+            # Try to extract command
+            if [[ "$full_content" == *'`'*'`'* ]]; then
+                suggested_command="${full_content#*\`}"
+                suggested_command="${suggested_command%%\`*}"
+            else
+                suggested_command=$(echo "$full_content" | grep -v '^[[:space:]]*$' | head -1)
+            fi
+        fi
+        
+        # Clean up the command
+        suggested_command="${suggested_command## }" # Remove leading spaces
+        suggested_command="${suggested_command%% }" # Remove trailing spaces
+        suggested_command="${suggested_command%%$'\n'*}" # Keep only first line
+        
+        # Clear the line
         printf "\r\033[2K"
 
-        if [[ $exit_code -eq 0 && -f "$debug_output_file" && -s "$debug_output_file" ]]; then
-            local suggested_command=$(cat "$debug_output_file")
-            suggested_command="${suggested_command## }" # Remove leading spaces
-            suggested_command="${suggested_command%% }" # Remove trailing spaces
-            llm_debugger_debug "Raw suggestion: '$suggested_command'"
+        if [[ $exit_code -eq 0 && -n "$suggested_command" ]]; then
+            # Store the suggestion for key bindings
+            llm_debugger_suggestion="$suggested_command"
+            llm_debugger_has_suggestion=1
 
-            if [[ -n "$suggested_command" ]]; then
-                # Store the suggestion for key bindings
-                llm_debugger_suggestion="$suggested_command"
-                llm_debugger_has_suggestion=1
+            # Display the final suggestion
+            local my_yellow=$'\e[33m'
+            local my_reset=$'\e[0m'
+            local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
+            print -- "$message"
 
-                # Display the final suggestion
-                local my_yellow=$'\e[33m'
-                local my_reset=$'\e[0m'
-                local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
-                print -- "$message"
+            # Bind Tab key to accept the suggestion
+            zle -N llm_debugger_accept_suggestion
+            bindkey '^I' llm_debugger_accept_suggestion # '^I' is Tab
+            llm_debugger_debug "Bound Tab key to llm_debugger_accept_suggestion"
 
-                # Bind Tab key to accept the suggestion
-                zle -N llm_debugger_accept_suggestion
-                bindkey '^I' llm_debugger_accept_suggestion # '^I' is Tab
-                llm_debugger_debug "Bound Tab key to llm_debugger_accept_suggestion"
-
-                # Bind Escape key to cancel the suggestion
-                zle -N llm_debugger_cancel_suggestion
-                bindkey '\e' llm_debugger_cancel_suggestion # Escape key
-                llm_debugger_debug "Bound Escape key to llm_debugger_cancel_suggestion"
-            else
-                printf "\033[91mNo suggestion generated (empty output)\033[0m\n"
-                llm_debugger_debug "Suggestion was empty after processing"
-            fi
+            # Bind Escape key to cancel the suggestion
+            zle -N llm_debugger_cancel_suggestion
+            bindkey '\e' llm_debugger_cancel_suggestion # Escape key
+            llm_debugger_debug "Bound Escape key to llm_debugger_cancel_suggestion"
         else
-            printf "\033[91mError: Failed to analyze command (exit code: $exit_code)\033[0m\n"
-            # Avoid command substitutions in debug calls to prevent recursion
-            local file_exists="no"
-            local file_size="0"
-            if [[ -f "$debug_output_file" ]]; then
-                file_exists="yes"
-                file_size=$(wc -c <"$debug_output_file" 2>/dev/null || echo 0)
-            fi
-            llm_debugger_debug "Debug failed - exit code: $exit_code, file exists: $file_exists, file size: $file_size"
-            if [[ -f "$debug_output_file" ]]; then
-                # Avoid command substitution in debug calls to prevent recursion
-                local debug_contents
-                debug_contents=$(cat "$debug_output_file" 2>/dev/null)
-                llm_debugger_debug "Debug output file contents: $debug_contents"
-            fi
+            printf "\033[91mNo suggestion generated\033[0m\n"
+            llm_debugger_debug "Failed to generate suggestion - exit code: $exit_code"
         fi
 
         # Clean up
-        rm -f "$debug_output_file"
+        rm -f "$debug_output_file" "$stream_file"
     else
         llm_debugger_debug "Command succeeded, no analysis needed"
     fi
@@ -689,10 +795,11 @@ llm_debugger_execute_and_analyze_sync() {
     local exit_status
     local result_file="/tmp/llm_debugger_debug_result"
     local debug_output_file="/tmp/llm_debugger_$$_debug_output"
+    local stream_file="/tmp/llm_debugger_$$_debug_stream"
 
     # Function to cleanup temp files
     cleanup_temps() {
-        rm -f "$temp_output" "$result_file" "$debug_output_file"
+        rm -f "$temp_output" "$result_file" "$debug_output_file" "$stream_file"
         llm_debugger_debug "Cleaned up temporary files"
     }
 
@@ -747,62 +854,178 @@ llm_debugger_execute_and_analyze_sync() {
         llm_debugger_has_suggestion=0
 
         # Clean up any existing result file
-        rm -f "$debug_output_file"
+        rm -f "$debug_output_file" "$stream_file"
 
         llm_debugger_debug "Started Python debugger for command: $command"
 
-        # Show thinking indicator
-        printf "\n\033[90m💭 Analyzing error...\033[0m"
-
-        # Use proper debug mode with tools and few-shot examples
-        # Run synchronously to avoid job control messages
-        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
+        # Terminal width for formatting
+        local term_width=$(tput cols)
+        local box_width=$((term_width > 80 ? 80 : term_width - 4))
+        
+        # Show thinking box
+        printf "\n\033[36m╭─ 💭 Analyzing Error ───────────────────────╮\033[0m\n"
+        printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Examining the error output..."
+        
+        # Run the Python script and capture streaming output
+        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$stream_file" 2>&1 &
+        local python_pid=$!
+        
+        # Monitor the streaming output
+        local last_size=0
+        local current_content=""
+        local in_think=0
+        local think_content=""
+        local think_displayed=0
+        local suggested_command=""
+        local found_think_tag=0
+        
+        while kill -0 "$python_pid" 2>/dev/null; do
+            if [[ -f "$stream_file" ]]; then
+                local current_size=$(wc -c <"$stream_file" 2>/dev/null || echo "0")
+                if [[ $current_size -gt $last_size ]]; then
+                    # Read new content
+                    local new_content=$(tail -c +$((last_size + 1)) "$stream_file" 2>/dev/null)
+                    current_content+="$new_content"
+                    
+                    # Check for <think> tag
+                    if [[ "$current_content" == *"<think>"* && $in_think -eq 0 ]]; then
+                        in_think=1
+                        found_think_tag=1
+                        think_content=""
+                    fi
+                    
+                    # Process thinking content
+                    if [[ $in_think -eq 1 ]]; then
+                        # Extract content between current position and </think> or end
+                        local temp_content="$current_content"
+                        temp_content="${temp_content#*<think>}"
+                        
+                        if [[ "$temp_content" == *"</think>"* ]]; then
+                            # Found closing tag
+                            think_content="${temp_content%%</think>*}"
+                            in_think=0
+                            
+                            # Display the thinking content line by line
+                            while IFS= read -r line; do
+                                # Skip empty lines at the beginning
+                                [[ -z "$line" && $think_displayed -eq 0 ]] && continue
+                                think_displayed=1
+                                
+                                # Word wrap long lines
+                                while [[ ${#line} -gt $((box_width - 4)) ]]; do
+                                    local wrap_point=$((box_width - 4))
+                                    # Find last space before wrap point
+                                    local i=$wrap_point
+                                    while [[ $i -gt 0 && "${line:$i:1}" != " " ]]; do
+                                        ((i--))
+                                    done
+                                    if [[ $i -eq 0 ]]; then
+                                        i=$wrap_point
+                                    fi
+                                    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "${line:0:$i}"
+                                    line="${line:$((i + 1))}"
+                                done
+                                printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "$line"
+                            done <<< "$think_content"
+                            
+                            # Close the thinking box
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            
+                            # Show command prompt
+                            printf "\033[32m▶\033[0m Suggested fix: "
+                        else
+                            # Still collecting thinking content
+                            think_content="$temp_content"
+                        fi
+                    elif [[ $think_displayed -eq 1 ]] || [[ $found_think_tag -eq 0 && $current_size -gt 100 ]]; then
+                        # After thinking OR if no think tags but we have content
+                        if [[ $found_think_tag -eq 0 && $think_displayed -eq 0 ]]; then
+                            # No think tags found - show generic message and close box
+                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Identifying the issue..."
+                            printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best fix..."
+                            printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+                            think_displayed=1
+                            printf "\033[32m▶\033[0m Suggested fix: "
+                        fi
+                        
+                        # Extract command after think tags
+                        local content_to_parse="$current_content"
+                        if [[ $found_think_tag -eq 1 ]]; then
+                            content_to_parse="${current_content#*</think>}"
+                        fi
+                        
+                        # Extract command from various formats
+                        # Look for backtick-wrapped commands
+                        if [[ "$content_to_parse" == *'`'*'`'* ]]; then
+                            suggested_command="${content_to_parse#*\`}"
+                            suggested_command="${suggested_command%%\`*}"
+                            suggested_command="${suggested_command%$'\n'}"
+                            suggested_command="${suggested_command#$'\n'}"
+                            # Update display
+                            printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
+                        else
+                            # Fallback: take first non-empty line after think
+                            suggested_command=$(echo "$content_to_parse" | grep -v '^[[:space:]]*$' | head -1)
+                            if [[ -n "$suggested_command" ]]; then
+                                printf "\r\033[2K\033[32m▶\033[0m Suggested fix: %s" "$suggested_command"
+                            fi
+                        fi
+                    fi
+                    
+                    last_size=$current_size
+                fi
+            fi
+            sleep 0.05
+        done
+        
+        # Wait for completion
+        wait $python_pid
         local exit_code=$?
-
-        # Clear the thinking line
+        
+        # If we didn't extract a command during streaming, try from the final output
+        if [[ -z "$suggested_command" && -f "$stream_file" ]]; then
+            local full_content=$(cat "$stream_file")
+            # Remove think tags
+            full_content="${full_content#*</think>}"
+            # Try to extract command
+            if [[ "$full_content" == *'`'*'`'* ]]; then
+                suggested_command="${full_content#*\`}"
+                suggested_command="${suggested_command%%\`*}"
+            else
+                suggested_command=$(echo "$full_content" | grep -v '^[[:space:]]*$' | head -1)
+            fi
+        fi
+        
+        # Clean up the command
+        suggested_command="${suggested_command## }"      # Remove leading spaces
+        suggested_command="${suggested_command%% }"      # Remove trailing spaces
+        suggested_command="${suggested_command%%$'\n'*}" # Keep only first line
+        
+        # Clear the line
         printf "\r\033[2K"
 
         # Read the result and set up inline suggestion
-        if [[ $exit_code -eq 0 && -f "$debug_output_file" && -s "$debug_output_file" ]]; then
-            local suggested_command=$(cat "$debug_output_file")
-            # Clean up the command
-            suggested_command="${suggested_command## }"      # Remove leading spaces
-            suggested_command="${suggested_command%% }"      # Remove trailing spaces
-            suggested_command="${suggested_command%%$'\n'*}" # Keep only first line
+        if [[ $exit_code -eq 0 && -n "$suggested_command" ]]; then
+            # Display the final suggestion as a message first
+            local my_yellow=$'\e[33m'
+            local my_reset=$'\e[0m'
+            local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
+            print -- "$message"
 
-            if [[ -n "$suggested_command" ]]; then
-                # Display the final suggestion as a message first
-                local my_yellow=$'\e[33m'
-                local my_reset=$'\e[0m'
-                local message="${my_yellow}🔧 Suggested command:${my_reset} $suggested_command"
-                print -- "$message"
+            # Clear buffer and show suggestion inline (like zsh-autosuggestions)
+            BUFFER=""
+            CURSOR=0
+            llm_debugger_show_inline_suggestion "$suggested_command"
 
-                # Clear buffer and show suggestion inline (like zsh-autosuggestions)
-                BUFFER=""
-                CURSOR=0
-                llm_debugger_show_inline_suggestion "$suggested_command"
-
-                # Store suggestion data
-                llm_debugger_suggestion="$suggested_command"
-                llm_debugger_has_suggestion=1
-                llm_debugger_debug "Set up inline suggestion for ? command: '$suggested_command'"
-            else
-                BUFFER=""
-                CURSOR=0
-                printf "\033[91mNo suggestion generated (empty output)\033[0m\n"
-                llm_debugger_debug "Suggested command was empty"
-            fi
+            # Store suggestion data
+            llm_debugger_suggestion="$suggested_command"
+            llm_debugger_has_suggestion=1
+            llm_debugger_debug "Set up inline suggestion for ? command: '$suggested_command'"
         else
             BUFFER=""
             CURSOR=0
-            printf "\033[91mError: Failed to analyze command (exit code: $exit_code)\033[0m\n"
-            llm_debugger_debug "Command analysis failed - exit code: $exit_code"
-            if [[ -f "$debug_output_file" ]]; then
-                # Avoid command substitution in debug calls to prevent recursion
-                local debug_contents
-                debug_contents=$(cat "$debug_output_file" 2>/dev/null)
-                llm_debugger_debug "Debug output file contents: $debug_contents"
-            fi
+            printf "\033[91mNo suggestion generated\033[0m\n"
+            llm_debugger_debug "Failed to generate suggestion - exit code: $exit_code"
         fi
     else
         llm_debugger_debug "Command succeeded, no analysis needed"
@@ -840,8 +1063,16 @@ llm_debugger_generate_command_interactive_sync() {
     BUFFER=""
     CURSOR=0
 
-    # Show thinking indicator
-    printf "\n\033[36m💭 Generating command...\033[0m"
+    # Terminal width for formatting
+    local term_width=$(tput cols)
+    local box_width=$((term_width > 80 ? 80 : term_width - 4))
+    
+    # Show thinking box
+    printf "\n\033[36m╭─ 💭 Thinking ──────────────────────────────╮\033[0m\n"
+    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Analyzing your request..."
+    printf "\033[36m│\033[0m \033[90m%-*s\033[0m \033[36m│\033[0m\n" $((box_width - 2)) "Determining the best command..."
+    printf "\033[36m╰────────────────────────────────────────────╯\033[0m\n\n"
+    printf "\033[32m▶\033[0m Generating command..."
 
     # Run the Python script synchronously (no streaming)
     # Run synchronously to avoid job control messages

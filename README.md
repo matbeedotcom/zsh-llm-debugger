@@ -14,6 +14,27 @@ An intelligent Zsh plugin that uses AI to debug failed commands and generate she
 - **🚀 Fast Local Inference**: Uses lightweight Ollama models for quick responses
 - **🌐 Universal LLM Support**: Works with any OpenAI-compatible API (OpenAI, Anthropic, Ollama, etc.)
 - **📦 Isolated Environment**: Uses a Python virtual environment to avoid conflicts
+- **🎨 Beautiful Think UI**: See the AI's reasoning process in an elegant boxed interface
+
+### AI Thinking Process Visualization
+
+The debugger now displays the AI's thought process in a beautiful, boxed UI:
+
+```
+╭─ 💭 Analyzing Error ───────────────────────╮
+│ Examining the error output...               │
+│ The error shows permission denied.          │
+│ This typically requires elevated privileges.│
+│ The solution is to use sudo...              │
+╰────────────────────────────────────────────╯
+
+▶ Suggested fix: sudo npm install -g typescript
+```
+
+This transparency helps you:
+- Understand why a particular fix is suggested
+- Learn from the AI's problem-solving approach
+- Build trust in the suggestions provided
 
 ## Installation
 

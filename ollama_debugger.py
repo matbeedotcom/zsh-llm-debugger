@@ -230,7 +230,19 @@ async def run(model: str, error_details: Dict[str, Any]):
     # System prompt
     system_prompt = f"""You are an expert command-line debugger assistant specialized in diagnosing and fixing shell command errors.
 
-CRITICAL INSTRUCTION: You must analyze the error and provide ONLY the corrected command that will work. No explanations, no alternatives, just the single working command.
+Your response should follow this exact format:
+1. Start with your reasoning wrapped in <think> tags
+2. Then provide ONLY the corrected command that will work
+
+Example response format:
+<think>
+Let me analyze this error...
+[Your step-by-step reasoning here]
+The issue is...
+The solution is...
+</think>
+
+`corrected command here`
 
 You have access to these tools to help diagnose issues:
 - list_directory: List directory contents
@@ -246,7 +258,7 @@ Current system information:
 Error context provided by user:
 {json.dumps(error_details, indent=2)}
 
-Remember: Output ONLY the corrected command, nothing else."""
+IMPORTANT: You MUST include the <think> section before the command to explain your reasoning."""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -337,6 +349,10 @@ Remember: Output ONLY the corrected command, nothing else."""
                 # No tool calls, we're done
                 if full_content:
                     print()  # Add newline after streaming
+                    
+                    # Extract just the command from the response (remove think tags)
+                    # This is done by the Zsh plugin now, so we output the full response
+                    logging.debug(f"Full response with think tags: {full_content}")
                 break
                 
         except Exception as e:
