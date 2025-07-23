@@ -787,7 +787,7 @@ def main():
             sys.exit(1)
 
         # Run the async function to interact with the model for debugging
-        asyncio.run(run('Qwen3:1.7b', error_details))
+        asyncio.run(run('qwen2.5:1.5b', error_details))
 
     elif len(sys.argv) >= 5:
         # Check if first argument is GENERATE_MODE
@@ -807,7 +807,7 @@ def main():
                 logging.debug(f"Loaded prompt: {prompt}")
                 
                 # Run the async function to generate command
-                asyncio.run(generate_command_from_prompt('Qwen3:1.7b', prompt, stream_mode))
+                asyncio.run(generate_command_from_prompt('qwen2.5:1.5b', prompt, stream_mode))
                 
             except Exception as e:
                 logging.exception(f"Error reading prompt file: {prompt_file}")
@@ -824,7 +824,7 @@ def main():
             logging.debug(f"Generated error details: {error_details}")
             
             # Run the async function to interact with the model for debugging
-            asyncio.run(run('Qwen3:1.7b', error_details))
+            asyncio.run(run('qwen2.5:1.5b', error_details))
 
     else:
         logging.error("Invalid arguments")

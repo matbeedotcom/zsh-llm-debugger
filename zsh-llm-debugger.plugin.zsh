@@ -6,7 +6,7 @@ export LLM_DEBUGGER_DEBUG=${LLM_DEBUGGER_DEBUG:-0}
 
 # Define paths
 plugin_dir="${0:A:h}"
-LLM_DEBUGGER_SCRIPT="${plugin_dir}/ollama_debugger.py"
+LLM_DEBUGGER_SCRIPT="${plugin_dir}/run_ollama_debugger.sh"
 
 LLM_DEBUGGER_LOG_FILE="$HOME/.llm_debugger_zsh.log" # Log file for Zsh plugin
 
@@ -348,7 +348,7 @@ llm_debugger_execute_and_analyze() {
         printf "\n\033[90m💭 Analyzing error...\033[0m"
 
         # Use proper debug mode with tools and few-shot examples
-        python3 "${plugin_dir}/ollama_debugger.py" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
+        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
         local exit_code=$?
 
         llm_debugger_debug "Python debugger exit code: $exit_code"
@@ -729,7 +729,7 @@ llm_debugger_execute_and_analyze_sync() {
 
         # Use proper debug mode with tools and few-shot examples
         # Run synchronously to avoid job control messages
-        python3 "${plugin_dir}/ollama_debugger.py" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
+        "${plugin_dir}/run_ollama_debugger.sh" "$command" "$temp_output" "None" "script" >"$debug_output_file" 2>&1
         local exit_code=$?
 
         # Clear the thinking line
@@ -815,7 +815,7 @@ llm_debugger_generate_command_interactive_sync() {
 
     # Run the Python script synchronously (no streaming)
     # Run synchronously to avoid job control messages
-    python3 "${plugin_dir}/ollama_debugger.py" "GENERATE_MODE" "$temp_prompt" "None" "generate" >"$result_file" 2>/dev/null
+    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" >"$result_file" 2>/dev/null
     local exit_code=$?
 
     # Clear the thinking line
@@ -892,7 +892,7 @@ llm_debugger_generate_command_interactive() {
     # Start the Python script in background
     # Suppress job control messages before starting background process
     llm_debugger_suppress_jobs
-    python3 "${plugin_dir}/ollama_debugger.py" "GENERATE_MODE" "$temp_prompt" "None" "generate" >"$result_file" 2>/dev/null &
+    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" >"$result_file" 2>/dev/null &
     local python_pid=$!
     llm_debugger_debug "Started ollama_debugger.py in interactive mode with PID $python_pid"
 
@@ -977,7 +977,7 @@ llm_debugger_generate_command() {
     # Start the Python script in streaming mode, redirecting to stream file
     # Suppress job control messages before starting background process
     llm_debugger_suppress_jobs
-    python3 "${plugin_dir}/ollama_debugger.py" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null &
+    "${plugin_dir}/run_ollama_debugger.sh" "GENERATE_MODE" "$temp_prompt" "None" "generate" "stream" >"$stream_file" 2>/dev/null &
     local python_pid=$!
     llm_debugger_debug "Started ollama_debugger.py in streaming mode with PID $python_pid"
 
@@ -1172,7 +1172,7 @@ debug_command_openai() {
 
     # Temporarily switch to openai debugger
     local original_script="$LLM_DEBUGGER_SCRIPT"
-    LLM_DEBUGGER_SCRIPT="${plugin_dir}/openai_debugger.py"
+    LLM_DEBUGGER_SCRIPT="${plugin_dir}/run_openai_debugger.sh"
 
     llm_debugger_execute_and_analyze "$command"
 
